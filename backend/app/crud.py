@@ -1,3 +1,5 @@
+from typing import Optional
+
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
@@ -9,7 +11,7 @@ def get_tasks(db: Session) -> list[models.Task]:
     return result.scalars().all()
 
 
-def get_task(db: Session, task_id: int) -> models.Task | None:
+def get_task(db: Session, task_id: int) -> Optional[models.Task]:
     return db.get(models.Task, task_id)
 
 
