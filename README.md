@@ -1,12 +1,18 @@
 ### 索引
 
-| 内容 | 位置 | 
-| ------| ------ | 
+| 内容 | 位置 |
+| ------| ------ |
 | 阿布量化系统源代码 | abupy目录 |
 | 阿布量化使用教程 | abupy_lecture目录 |
 | 阿布量化非编程界面操作 | abupy_ui目录 |
-| 《量化交易之路》示例代码 | ipython／python目录| 
-| 《机器学习之路》示例代码 | https://github.com/maxmon/abu_ml | 
+| 《量化交易之路》示例代码 | ipython／python目录|
+| 《机器学习之路》示例代码 | https://github.com/maxmon/abu_ml |
+| 前后端分离示例（FastAPI + Vue3） | backend / frontend |
+
+## 前后端分离快速开始
+- 后端：位于 `backend`，基于 FastAPI + PostgreSQL（默认账号 `postgres/123456`），运行 `uvicorn app.main:app --reload` 启动，API 文档在 `/api/v1/docs`。
+- 前端：位于 `frontend`，基于 Vue3 + Vite，运行 `npm install` 与 `npm run dev` 启动，已配置代理到本地后端并包含 Pinia 状态管理与路由。
+- API 数据格式遵循统一的 JSON envelope：`{ "message": "...", "data": {...} }`，便于前后端契约协同与错误处理。
 
 
 ###  🏆 [览器访问网址: https://www.abuquant.com](https://www.abuquant.com)
