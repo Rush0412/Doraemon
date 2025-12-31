@@ -1,9 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 import csv
 import io
 import json
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -20,6 +22,80 @@ jobs_router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 executor = ThreadPoolExecutor(max_workers=4)
 logger = logging.getLogger("doraemon")
+SYMBOL_PREFIXES = ("us", "hk", "sh", "sz")
+DEFAULT_SYMBOLS = {
+    "US": ["usAAPL"],
+    "HK": ["hk00700"],
+    "CN": ["sh600036"],
+}
+DEFAULT_BENCHMARKS = {
+    "US": "usSPY",
+    "HK": "hk00001",
+    "CN": "sh000001",
+}
+
+
+def _split_symbols(raw) -> list[str]:
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        return [item for item in re.split(r"[\s,;]+", raw) if item]
+    if isinstance(raw, (list, tuple)):
+        return [str(item) for item in raw if str(item).strip()]
+    return [str(raw)]
+
+
+def _normalize_symbol(symbol: str, market: str) -> Optional[str]:
+    if not symbol:
+        return None
+    sym = symbol.strip()
+    if not sym:
+        return None
+    lower = sym.lower()
+    for prefix in SYMBOL_PREFIXES:
+        if lower.startswith(prefix):
+            suffix = sym[len(prefix) :]
+            if prefix == "us":
+                suffix = suffix.upper()
+            return f"{prefix}{suffix}"
+    if market == "US":
+        return f"us{sym.upper()}"
+    if market == "HK":
+        return f"hk{sym}"
+    if market in {"CN", "SH", "SZ"}:
+        prefix = "sh" if sym.startswith("6") else "sz"
+        return f"{prefix}{sym}"
+    return sym
+
+
+def _normalize_symbols(raw, market: str) -> list[str]:
+    symbols = [_normalize_symbol(item, market) for item in _split_symbols(raw)]
+    symbols = [item for item in symbols if item]
+    if symbols:
+        return symbols
+    return DEFAULT_SYMBOLS.get(market, DEFAULT_SYMBOLS["US"])
+
+
+@contextmanager
+def _with_market_env(market: str):
+    from abupy.CoreBu import ABuEnv
+    from abupy import EMarketTargetType
+
+    market_map = {
+        "CN": EMarketTargetType.E_MARKET_TARGET_CN,
+        "US": EMarketTargetType.E_MARKET_TARGET_US,
+        "HK": EMarketTargetType.E_MARKET_TARGET_HK,
+    }
+    target = market_map.get(market)
+    prev = None
+    if target is not None:
+        prev = ABuEnv.g_market_target
+        ABuEnv.g_market_target = target
+    try:
+        yield
+    finally:
+        if target is not None and prev is not None:
+            ABuEnv.g_market_target = prev
 
 
 def _repo_root() -> Path:
@@ -96,13 +172,13 @@ def list_feature_map():
             {"name": "股票基本信息查询", "source": "abupy_ui/widget_stock_info.py", "api": "/api/v1/quant/symbols"},
             {"name": "数据下载界面操作", "source": "abupy_ui/widget_update_ui.py", "api": "/api/v1/quant/kl/update"},
             {"name": "历史回测界面操作", "source": "abupy_ui/widget_loop_back.py", "api": "/api/v1/quant/backtest"},
-            {"name": "参数最优交叉验证", "source": "abupy/WidgetBu/ABuWGGridSearch.py", "api": "/api/v1/jobs"},
-            {"name": "量化分析工具", "source": "abupy_ui/widget_quant_tool.py", "api": "/api/v1/jobs"},
+            {"name": "参数最优交叉验证", "source": "abupy/WidgetBu/ABuWGGridSearch.py", "api": "/api/v1/quant/grid-search"},
+            {"name": "量化分析工具", "source": "abupy_ui/widget_quant_tool.py", "api": "/api/v1/quant/tools"},
             {"name": "环境验证工具", "source": "abupy_ui/widget_verify_tool.py", "api": "/api/v1/quant/verify"},
         ],
         "phase_plan": [
             {"phase": 1, "scope": ["symbol search", "kl update", "backtest jobs", "job status sync"]},
-            {"phase": 2, "scope": ["grid search jobs", "report export", "result persistence"]},
+            {"phase": 2, "scope": ["grid search jobs", "analysis tools", "report export", "result persistence"]},
             {"phase": 3, "scope": ["strategy library", "fine-grained permissions", "audit logs"]},
         ],
     }
@@ -183,18 +259,12 @@ def _run_job(job_id: int):
             return
 
         if job.type == "backtest":
-            from abupy import abu, EMarketTargetType
+            from abupy import abu
             from abupy.FactorBuyBu import AbuFactorBuyBreak
             from abupy.FactorSellBu import AbuFactorAtrNStop
 
             market = (job.params.get("market") or "CN").upper()
-            market_map = {
-                "CN": EMarketTargetType.E_MARKET_TARGET_CN,
-                "US": EMarketTargetType.E_MARKET_TARGET_US,
-                "HK": EMarketTargetType.E_MARKET_TARGET_HK,
-            }
-
-            symbols = job.params.get("symbols") or ["usAAPL", "usTSLA"]
+            symbols = _normalize_symbols(job.params.get("symbols"), market)
             buy_factors = [{"class": AbuFactorBuyBreak, "xd": job.params.get("buy_xd", 42)}]
             sell_factors = [
                 {
@@ -203,20 +273,23 @@ def _run_job(job_id: int):
                     "stop_win_n": job.params.get("stop_win_n", 3.0),
                 }
             ]
-            abu_result, _ = abu.run_loop_back(
-                read_cash=job.params.get("cash", 1000000),
-                buy_factors=buy_factors,
-                sell_factors=sell_factors,
-                choice_symbols=symbols,
-                n_folds=job.params.get("n_folds", 1),
-                start=job.params.get("start"),
-                end=job.params.get("end"),
-                n_process_kl=1,
-                n_process_pick=1,
-            )
+            with _with_market_env(market):
+                abu_result, _ = abu.run_loop_back(
+                    read_cash=job.params.get("cash", 1000000),
+                    buy_factors=buy_factors,
+                    sell_factors=sell_factors,
+                    choice_symbols=symbols,
+                    n_folds=job.params.get("n_folds", 1),
+                    start=job.params.get("start"),
+                    end=job.params.get("end"),
+                    n_process_kl=1,
+                    n_process_pick=1,
+                )
             if abu_result is None:
                 raise RuntimeError("Backtest returned empty result")
             summary = {
+                "market": market,
+                "symbols": symbols,
                 "orders_rows": int(getattr(abu_result.orders_pd, "shape", [0])[0]),
                 "actions_rows": int(getattr(abu_result.action_pd, "shape", [0])[0]),
                 "benchmark": getattr(getattr(abu_result, "benchmark", None), "symbol", None),
@@ -249,18 +322,12 @@ def _run_job(job_id: int):
         if job.type == "grid_search":
             from itertools import product
 
-            from abupy import abu, EMarketTargetType
+            from abupy import abu
             from abupy.FactorBuyBu import AbuFactorBuyBreak
             from abupy.FactorSellBu import AbuFactorAtrNStop
 
             market = (job.params.get("market") or "CN").upper()
-            market_map = {
-                "CN": EMarketTargetType.E_MARKET_TARGET_CN,
-                "US": EMarketTargetType.E_MARKET_TARGET_US,
-                "HK": EMarketTargetType.E_MARKET_TARGET_HK,
-            }
-
-            symbols = job.params.get("symbols") or ["usAAPL", "usTSLA"]
+            symbols = _normalize_symbols(job.params.get("symbols"), market)
             cash = job.params.get("cash", 1000000)
             n_folds = job.params.get("n_folds", 1)
             start = job.params.get("start")
@@ -273,35 +340,36 @@ def _run_job(job_id: int):
             max_runs = max(1, min(max_runs, 200))
 
             runs = []
-            for i, (buy_xd, stop_loss_n, stop_win_n) in enumerate(
-                product(buy_xd_list, stop_loss_n_list, stop_win_n_list)
-            ):
-                if i >= max_runs:
-                    break
-                buy_factors = [{"class": AbuFactorBuyBreak, "xd": buy_xd}]
-                sell_factors = [{"class": AbuFactorAtrNStop, "stop_loss_n": stop_loss_n, "stop_win_n": stop_win_n}]
-                abu_result, _ = abu.run_loop_back(
-                    read_cash=cash,
-                    buy_factors=buy_factors,
-                    sell_factors=sell_factors,
-                    choice_symbols=symbols,
-                    n_folds=n_folds,
-                    start=start,
-                    end=end,
-                    n_process_kl=1,
-                    n_process_pick=1,
-                )
-                if abu_result is None:
-                    continue
-                summary = {
-                    "buy_xd": buy_xd,
-                    "stop_loss_n": stop_loss_n,
-                    "stop_win_n": stop_win_n,
-                    "orders_rows": int(getattr(abu_result.orders_pd, "shape", [0])[0]),
-                    "actions_rows": int(getattr(abu_result.action_pd, "shape", [0])[0]),
-                    "benchmark": getattr(getattr(abu_result, "benchmark", None), "symbol", None),
-                }
-                runs.append(summary)
+            with _with_market_env(market):
+                for i, (buy_xd, stop_loss_n, stop_win_n) in enumerate(
+                    product(buy_xd_list, stop_loss_n_list, stop_win_n_list)
+                ):
+                    if i >= max_runs:
+                        break
+                    buy_factors = [{"class": AbuFactorBuyBreak, "xd": buy_xd}]
+                    sell_factors = [{"class": AbuFactorAtrNStop, "stop_loss_n": stop_loss_n, "stop_win_n": stop_win_n}]
+                    abu_result, _ = abu.run_loop_back(
+                        read_cash=cash,
+                        buy_factors=buy_factors,
+                        sell_factors=sell_factors,
+                        choice_symbols=symbols,
+                        n_folds=n_folds,
+                        start=start,
+                        end=end,
+                        n_process_kl=1,
+                        n_process_pick=1,
+                    )
+                    if abu_result is None:
+                        continue
+                    summary = {
+                        "buy_xd": buy_xd,
+                        "stop_loss_n": stop_loss_n,
+                        "stop_win_n": stop_win_n,
+                        "orders_rows": int(getattr(abu_result.orders_pd, "shape", [0])[0]),
+                        "actions_rows": int(getattr(abu_result.action_pd, "shape", [0])[0]),
+                        "benchmark": getattr(getattr(abu_result, "benchmark", None), "symbol", None),
+                    }
+                    runs.append(summary)
 
             runs_sorted = sorted(runs, key=lambda x: (x.get("orders_rows", 0), x.get("actions_rows", 0)), reverse=True)
             best = runs_sorted[0] if runs_sorted else None
@@ -316,6 +384,11 @@ def _run_job(job_id: int):
                     "runs": runs_sorted[:200],
                 },
             )
+            return
+
+        if job.type == "analysis":
+            result = _run_analysis_job(job.params)
+            crud.set_quant_job_result(db, job, result)
             return
 
         if job.type == "verify":
@@ -361,6 +434,308 @@ def _run_job(job_id: int):
         db.close()
 
 
+def _df_to_records(df, limit: int = 200):
+    if limit:
+        df = df.head(limit)
+    return json.loads(df.to_json(orient="records", date_format="iso"))
+
+
+def _df_to_matrix(df):
+    if hasattr(df, "to_frame") and not hasattr(df, "columns"):
+        df = df.to_frame()
+    df = df.copy()
+    df = df.fillna(0)
+    return {
+        "columns": [str(col) for col in df.columns],
+        "index": [str(idx) for idx in df.index],
+        "data": df.values.tolist(),
+    }
+
+
+def _series_points(series, limit: int = 200):
+    series = series.tail(limit)
+    points = []
+    for idx, val in series.items():
+        try:
+            y = float(val)
+        except (TypeError, ValueError):
+            y = None
+        points.append({"x": str(idx), "y": y})
+    return points
+
+
+def _run_analysis_job(params: dict) -> dict:
+    import numpy as np
+    import pandas as pd
+    from abupy.MarketBu import ABuSymbolPd
+    from abupy.TLineBu import AbuTLine, EShiftDistanceHow
+    from abupy.TLineBu.ABuTLExecute import calc_pair_speed, find_golden_point, find_golden_point_ex, regress_trend_channel
+    from abupy.TLineBu.ABuTLJump import calc_jump, calc_jump_line, calc_jump_line_weight
+    from abupy.SimilarBu.ABuCorrcoef import corr_matrix, ECoreCorrType
+    from abupy.UtilBu import ABuKLUtil
+    from abupy.UtilBu.ABuStatsUtil import (
+        manhattan_distance_matrix,
+        euclidean_distance_matrix,
+        cosine_distance_matrix,
+    )
+
+    tool = (params.get("tool") or "").strip().lower()
+    market = (params.get("market") or "US").upper()
+    symbols = _normalize_symbols(params.get("symbols"), market)
+    start = params.get("start")
+    end = params.get("end")
+    n_folds = params.get("n_folds", 1)
+    limit = int(params.get("limit", 200))
+    options = params.get("options") or {}
+
+    def _fetch_kl(symbol: str):
+        return ABuSymbolPd.make_kl_df(symbol, n_folds=n_folds, start=start, end=end)
+
+    def _fetch_kl_dict(items: list[str]):
+        data = {}
+        for sym in items:
+            kl = _fetch_kl(sym)
+            if kl is not None:
+                data[sym] = kl
+        return data
+
+    def _sample_series(series, max_points: int):
+        if not max_points or len(series) <= max_points:
+            return series
+        step = max(1, int(len(series) / max_points))
+        return series[::step]
+
+    with _with_market_env(market):
+        if tool in {"support_resistance", "support", "resistance"}:
+            symbol = symbols[0]
+            kl = _fetch_kl(symbol)
+            if kl is None:
+                raise RuntimeError(f"No data for {symbol}")
+            tl = AbuTLine(kl.close, symbol)
+            only_last_raw = options.get("only_last", True)
+            if isinstance(only_last_raw, str):
+                only_last = only_last_raw.strip().lower() in {"true", "1", "yes", "y"}
+            else:
+                only_last = bool(only_last_raw)
+            trends = tl.show_support_resistance_trend(only_last=only_last, show=False, show_step=False) or {}
+            trend_lines = []
+            x_start = 0
+            x_end = len(tl.tl) - 1
+            for key, lines in trends.items():
+                for line in lines:
+                    if not line or len(line) < 2:
+                        continue
+                    trend_lines.append(
+                        {
+                            "type": key,
+                            "x_start": x_start,
+                            "x_end": x_end,
+                            "y_start": float(line[0]),
+                            "y_end": float(line[1]),
+                        }
+                    )
+            return {
+                "tool": tool,
+                "symbol": symbol,
+                "trend_lines": trend_lines,
+                "close": _series_points(kl.close, limit=limit),
+            }
+
+        if tool in {"jump_gap", "jump"}:
+            symbol = symbols[0]
+            kl = _fetch_kl(symbol)
+            if kl is None:
+                raise RuntimeError(f"No data for {symbol}")
+            mode = (options.get("mode") or "stats").lower()
+            jump_diff_factor = float(options.get("jump_diff_factor", 1.0))
+            power_threshold = float(options.get("power_threshold", 2.0))
+            weight = options.get("weight") or (0.5, 0.5)
+            if isinstance(weight, (list, tuple)) and len(weight) == 2:
+                weight = (float(weight[0]), float(weight[1]))
+            else:
+                weight = (0.5, 0.5)
+            if mode == "gap":
+                result = calc_jump_line(kl, power_threshold=power_threshold, jump_diff_factor=jump_diff_factor)
+            elif mode == "weighted":
+                result = calc_jump_line_weight(
+                    kl, sw=weight, power_threshold=power_threshold, jump_diff_factor=jump_diff_factor
+                )
+            else:
+                result = calc_jump(kl, jump_diff_factor=jump_diff_factor)
+            return {
+                "tool": tool,
+                "symbol": symbol,
+                "mode": mode,
+                "rows": _df_to_records(result, limit=limit),
+            }
+
+        if tool in {"trend_speed", "pair_speed"}:
+            symbol = symbols[0]
+            benchmark = options.get("benchmark") or (
+                symbols[1] if len(symbols) > 1 else DEFAULT_BENCHMARKS.get(market, DEFAULT_SYMBOLS["US"][0])
+            )
+            benchmark = _normalize_symbol(benchmark, market) or DEFAULT_BENCHMARKS.get(market, DEFAULT_SYMBOLS["US"][0])
+            resample = int(options.get("resample", 5))
+            speed_key = options.get("speed_key", "close")
+            speed, benchmark_speed, corr = calc_pair_speed(
+                symbol,
+                benchmark,
+                resample=resample,
+                speed_key=speed_key,
+                start=start,
+                end=end,
+                n_folds=n_folds,
+                show=False,
+            )
+            return {
+                "tool": tool,
+                "symbol": symbol,
+                "benchmark": benchmark,
+                "speed": speed,
+                "benchmark_speed": benchmark_speed,
+                "corr": corr,
+            }
+
+        if tool in {"shift_distance"}:
+            symbol = symbols[0]
+            kl = _fetch_kl(symbol)
+            if kl is None:
+                raise RuntimeError(f"No data for {symbol}")
+            step_x = float(options.get("step_x", 1.0))
+            mode = options.get("mode", "close")
+            mode_map = {
+                "close": EShiftDistanceHow.shift_distance_close,
+                "maxmin": EShiftDistanceHow.shift_distance_maxmin,
+                "summaxmin": EShiftDistanceHow.shift_distance_sum_maxmin,
+            }
+            how = mode_map.get(mode, EShiftDistanceHow.shift_distance_close)
+            tl = AbuTLine(kl.close, symbol)
+            segments = tl.show_shift_distance(how=how, step_x=step_x, show=False, show_log=False)
+            rows = []
+            for idx, item in enumerate(segments or []):
+                rows.append(
+                    {
+                        "segment": idx,
+                        "h_distance": float(item[0]),
+                        "v_distance": float(item[1]),
+                        "distance": float(item[2]),
+                        "shift": float(item[3]),
+                        "ratio": float(item[4]),
+                    }
+                )
+            return {"tool": tool, "symbol": symbol, "segments": rows}
+
+        if tool in {"regress", "price_channel"}:
+            symbol = symbols[0]
+            kl = _fetch_kl(symbol)
+            if kl is None:
+                raise RuntimeError(f"No data for {symbol}")
+            mode = options.get("mode", "best")
+            tl = AbuTLine(kl.close, symbol)
+            payload = {"tool": tool, "symbol": symbol, "mode": mode}
+            if mode == "least":
+                payload["least_poly"] = tl.show_least_valid_poly(show=False)
+            elif mode == "best":
+                payload["best_poly"] = tl.show_best_poly(show=False)
+            else:
+                y_below, y_fit, y_above = regress_trend_channel(np.array(kl.close.values))
+                y_fit = _sample_series(y_fit, limit)
+                y_below = _sample_series(y_below, limit)
+                y_above = _sample_series(y_above, limit)
+                payload["channel"] = {
+                    "x": list(range(len(y_fit))),
+                    "below": list(map(float, y_below)),
+                    "fit": list(map(float, y_fit)),
+                    "above": list(map(float, y_above)),
+                }
+            payload["close"] = _series_points(kl.close, limit=limit)
+            return payload
+
+        if tool in {"golden_ratio", "golden"}:
+            symbol = symbols[0]
+            kl = _fetch_kl(symbol)
+            if kl is None:
+                raise RuntimeError(f"No data for {symbol}")
+            x = np.arange(0, len(kl.close))
+            y = np.array(kl.close.values)
+            sp382, sp50, sp618 = find_golden_point(x, y, show=False)
+            sp382_ex, sp50_ex, sp618_ex = find_golden_point_ex(x, y, show=False)
+            return {
+                "tool": tool,
+                "symbol": symbol,
+                "golden": {"sp382": sp382, "sp50": sp50, "sp618": sp618},
+                "golden_ex": {"sp382": sp382_ex, "sp50": sp50_ex, "sp618": sp618_ex},
+            }
+
+        if tool in {"correlation", "distance"}:
+            kl_dict = _fetch_kl_dict(symbols)
+            if len(kl_dict) < 2:
+                raise RuntimeError("Correlation tools require at least two symbols")
+            field = options.get("field", "p_change")
+            df = pd.concat({sym: kl_dict[sym][field] for sym in kl_dict}, axis=1).fillna(0)
+            if tool == "correlation":
+                corr_mode = options.get("corr_type", "pears")
+                corr = corr_matrix(df, similar_type=ECoreCorrType(corr_mode))
+                return {"tool": tool, "field": field, "matrix": _df_to_matrix(corr)}
+            dist_mode = options.get("distance_type", "manhattan")
+            if dist_mode == "euclidean":
+                dist = euclidean_distance_matrix(df, scale_end=True, to_similar=False)
+            elif dist_mode == "cosine":
+                dist = cosine_distance_matrix(df, scale_end=True, to_similar=False)
+            else:
+                dist = manhattan_distance_matrix(df, scale_end=True, to_similar=False)
+            return {"tool": tool, "field": field, "matrix": _df_to_matrix(dist)}
+
+        if tool in {
+            "p_change_stats",
+            "date_week_wave",
+            "date_week_win",
+            "bcut_change_vc",
+            "qcut_change_vc",
+            "wave_change_rate",
+        }:
+            kl_dict = _fetch_kl_dict(symbols)
+            if not kl_dict:
+                raise RuntimeError("No data for requested symbols")
+            payload = {"tool": tool, "symbols": list(kl_dict.keys())}
+            if tool == "date_week_wave":
+                payload["result"] = _df_to_matrix(ABuKLUtil.date_week_wave(kl_dict))
+            elif tool == "date_week_win":
+                payload["result"] = _df_to_matrix(ABuKLUtil.date_week_win(kl_dict))
+            elif tool == "bcut_change_vc":
+                payload["result"] = _df_to_matrix(ABuKLUtil.bcut_change_vc(kl_dict))
+            elif tool == "qcut_change_vc":
+                payload["result"] = _df_to_matrix(ABuKLUtil.qcut_change_vc(kl_dict))
+            elif tool == "wave_change_rate":
+                wave_map = {}
+                for sym, df in kl_dict.items():
+                    wave = ((df.high - df.low) / df.pre_close) * 100
+                    wave_rate = wave.mean() / np.abs(df["p_change"]).mean()
+                    wave_map[sym] = float(wave_rate)
+                payload["result"] = wave_map
+            else:
+                stats_map = {}
+                for sym, df in kl_dict.items():
+                    p_change_up = df[df["p_change"] > 0]["p_change"]
+                    p_change_down = df[df["p_change"] < 0]["p_change"]
+                    stats_map[sym] = {
+                        "up_mean": float(p_change_up.mean()) if not p_change_up.empty else None,
+                        "up_count": int(p_change_up.count()),
+                        "down_mean": float(p_change_down.mean()) if not p_change_down.empty else None,
+                        "down_count": int(p_change_down.count()),
+                        "mean_ratio": float(abs(p_change_up.mean() / p_change_down.mean()))
+                        if not p_change_up.empty and not p_change_down.empty
+                        else None,
+                        "count_ratio": float(p_change_up.count() / p_change_down.count())
+                        if p_change_down.count()
+                        else None,
+                    }
+                payload["result"] = stats_map
+            return payload
+
+    raise RuntimeError("Unsupported analysis tool")
+
+
 @quant_router.post("/kl/update", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
 def start_kl_update(payload: dict, db: Session = Depends(get_db)):
     job = crud.create_quant_job(db, schemas.QuantJobCreate(type="kl_update", params=payload))
@@ -371,6 +746,20 @@ def start_kl_update(payload: dict, db: Session = Depends(get_db)):
 @quant_router.post("/backtest", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
 def start_backtest(payload: dict, db: Session = Depends(get_db)):
     job = crud.create_quant_job(db, schemas.QuantJobCreate(type="backtest", params=payload))
+    executor.submit(_run_job, job.id)
+    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.from_orm(job))
+
+
+@quant_router.post("/grid-search", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
+def start_grid_search(payload: dict, db: Session = Depends(get_db)):
+    job = crud.create_quant_job(db, schemas.QuantJobCreate(type="grid_search", params=payload))
+    executor.submit(_run_job, job.id)
+    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.from_orm(job))
+
+
+@quant_router.post("/tools", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
+def start_quant_tools(payload: dict, db: Session = Depends(get_db)):
+    job = crud.create_quant_job(db, schemas.QuantJobCreate(type="analysis", params=payload))
     executor.submit(_run_job, job.id)
     return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.from_orm(job))
 

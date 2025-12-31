@@ -1,17 +1,20 @@
 <template>
-  <main class="container">
-    <section class="card">
-      <header class="header">
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-dot"></span>
         <div>
-          <p class="muted" style="margin: 0;">Doraemon platform</p>
-          <h1 style="margin: 0;">Doraemon Console</h1>
+          <p class="brand-title">Doraemon</p>
+          <p class="brand-sub">Quant & Task Studio</p>
         </div>
-        <nav class="nav">
-          <router-link to="/" class="btn-secondary">Tasks</router-link>
-          <router-link to="/quant" class="btn-secondary">Quant</router-link>
-        </nav>
-      </header>
+      </div>
+      <nav class="nav">
+        <router-link to="/" class="nav-link">Tasks</router-link>
+        <router-link to="/quant" class="nav-link">Quant</router-link>
+      </nav>
+    </header>
+    <main class="app-main">
       <router-view />
-    </section>
-  </main>
+    </main>
+  </div>
 </template>

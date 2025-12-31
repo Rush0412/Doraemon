@@ -75,7 +75,20 @@ export const useQuantStore = defineStore('quant', {
       this.activeJob = job
       await this.fetchJobs()
       return job
+    },
+    async startGridSearch(params = {}) {
+      const { data } = await api.post('/quant/grid-search', params)
+      const job = data.data
+      this.activeJob = job
+      await this.fetchJobs()
+      return job
+    },
+    async startQuantTool(params = {}) {
+      const { data } = await api.post('/quant/tools', params)
+      const job = data.data
+      this.activeJob = job
+      await this.fetchJobs()
+      return job
     }
   }
 })
-
