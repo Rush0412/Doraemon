@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import csv
 import io
@@ -16,22 +17,28 @@ from . import crud, schemas
 from .database import get_db, SessionLocal
 
 router = APIRouter()
-tasks_router = APIRouter(prefix="/tasks", tags=["tasks"])
 quant_router = APIRouter(prefix="/quant", tags=["quant"])
 jobs_router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 executor = ThreadPoolExecutor(max_workers=4)
 logger = logging.getLogger("doraemon")
 SYMBOL_PREFIXES = ("us", "hk", "sh", "sz")
+CN_MARKETS = {"SH", "SZ", "300"}
 DEFAULT_SYMBOLS = {
     "US": ["usAAPL"],
     "HK": ["hk00700"],
     "CN": ["sh600036"],
+    "SH": ["sh600036"],
+    "SZ": ["sz000001"],
+    "300": ["sz300750"],
 }
 DEFAULT_BENCHMARKS = {
     "US": "usSPY",
     "HK": "hk00001",
     "CN": "sh000001",
+    "SH": "sh000001",
+    "SZ": "sz399001",
+    "300": "sz399006",
 }
 
 
@@ -62,9 +69,13 @@ def _normalize_symbol(symbol: str, market: str) -> Optional[str]:
         return f"us{sym.upper()}"
     if market == "HK":
         return f"hk{sym}"
-    if market in {"CN", "SH", "SZ"}:
+    if market in {"CN"}:
         prefix = "sh" if sym.startswith("6") else "sz"
         return f"{prefix}{sym}"
+    if market in {"SH"}:
+        return f"sh{sym}"
+    if market in {"SZ", "300"}:
+        return f"sz{sym}"
     return sym
 
 
@@ -83,6 +94,9 @@ def _with_market_env(market: str):
 
     market_map = {
         "CN": EMarketTargetType.E_MARKET_TARGET_CN,
+        "SH": EMarketTargetType.E_MARKET_TARGET_CN,
+        "SZ": EMarketTargetType.E_MARKET_TARGET_CN,
+        "300": EMarketTargetType.E_MARKET_TARGET_CN,
         "US": EMarketTargetType.E_MARKET_TARGET_US,
         "HK": EMarketTargetType.E_MARKET_TARGET_HK,
     }
@@ -98,13 +112,274 @@ def _with_market_env(market: str):
             ABuEnv.g_market_target = prev
 
 
+def _safe_float(value):
+    try:
+        if value is None:
+            return None
+        if hasattr(value, "item"):
+            value = value.item()
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value):
+    try:
+        if value is None:
+            return None
+        if hasattr(value, "item"):
+            value = value.item()
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_trade_date(value) -> Optional[date]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        value = int(value)
+        return datetime.strptime(str(value), "%Y%m%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_date_str(value: Optional[str]) -> Optional[date]:
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _kl_rows_from_df(df, market: str, symbol: str) -> list[dict]:
+    rows = []
+    for _, row in df.iterrows():
+        trade_date = _parse_trade_date(row.get("date")) or _parse_trade_date(getattr(row, "name", None))
+        if trade_date is None:
+            continue
+        rows.append(
+            {
+                "market": market,
+                "symbol": symbol,
+                "trade_date": trade_date,
+                "open": _safe_float(row.get("open")),
+                "close": _safe_float(row.get("close")),
+                "high": _safe_float(row.get("high")),
+                "low": _safe_float(row.get("low")),
+                "pre_close": _safe_float(row.get("pre_close")),
+                "p_change": _safe_float(row.get("p_change")),
+                "volume": _safe_int(row.get("volume")),
+                "date_week": _safe_int(row.get("date_week")),
+                "key": _safe_int(row.get("key")),
+                "atr14": _safe_float(row.get("atr14")),
+                "atr21": _safe_float(row.get("atr21")),
+            }
+        )
+    return rows
+
+
+def _kl_df_from_rows(rows: list) -> Optional["pandas.DataFrame"]:
+    import pandas as pd
+
+    if not rows:
+        return None
+    data = []
+    for row in rows:
+        trade_date = row.trade_date
+        data.append(
+            {
+                "date": int(trade_date.strftime("%Y%m%d")),
+                "date_week": row.date_week if row.date_week is not None else trade_date.weekday(),
+                "key": row.key,
+                "open": row.open,
+                "close": row.close,
+                "high": row.high,
+                "low": row.low,
+                "pre_close": row.pre_close,
+                "p_change": row.p_change,
+                "volume": row.volume,
+                "atr14": row.atr14,
+                "atr21": row.atr21,
+            }
+        )
+    df = pd.DataFrame(data)
+    df.sort_values("date", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+    df.index = pd.to_datetime(df["date"].astype(str))
+    return df
+
+
+def _market_from_symbol(symbol: str) -> str:
+    if not symbol:
+        return "CN"
+    lower = symbol.lower()
+    if lower.startswith("sh"):
+        return "SH"
+    if lower.startswith("sz"):
+        code = symbol[2:]
+        return "300" if code.startswith("3") else "SZ"
+    if lower.startswith("hk"):
+        return "HK"
+    if lower.startswith("us"):
+        return "US"
+    return "CN"
+
+
+def _resolve_benchmark_symbol(market: str) -> str:
+    key = (market or "CN").upper()
+    return DEFAULT_BENCHMARKS.get(key, DEFAULT_BENCHMARKS["CN"])
+
+
+def _symbol_kind(symbol: str, name: Optional[str], industry: Optional[str]) -> str:
+    if name and "指数" in name:
+        return "index"
+    if industry and "指数" in industry:
+        return "index"
+    lower = (symbol or "").lower()
+    if lower.startswith("sh000") or lower.startswith("sz399"):
+        return "index"
+    return "stock"
+
+
+def _ensure_symbol_klines(
+    db: Session,
+    symbol: str,
+    start: Optional[str],
+    end: Optional[str],
+    n_folds: int,
+) -> bool:
+    market = _market_from_symbol(symbol)
+    start_date = _parse_date_str(start)
+    end_date = _parse_date_str(end)
+    rows = crud.load_klines(db, market, symbol, start=start_date, end=end_date)
+    if rows:
+        return True
+    from abupy.MarketBu import ABuSymbolPd
+
+    with _with_market_env(market):
+        df = ABuSymbolPd.make_kl_df(symbol, n_folds=n_folds, start=start, end=end)
+    if df is None or getattr(df, "empty", False):
+        return False
+    rows = _kl_rows_from_df(df, market, symbol)
+    crud.upsert_stock_klines(db, rows)
+    return True
+
+
+@contextmanager
+def _with_benchmark_fallback(fallback_symbol: Optional[str]):
+    import abupy.CoreBu.ABu as abu_module
+    from abupy.TradeBu.ABuBenchmark import AbuBenchmark as BaseBenchmark
+
+    if not fallback_symbol:
+        yield
+        return
+
+    class PatchedBenchmark(BaseBenchmark):
+        def __init__(self, benchmark=None, start=None, end=None, n_folds=2, rs=True, benchmark_kl_pd=None):
+            try:
+                super().__init__(benchmark, start, end, n_folds, rs, benchmark_kl_pd)
+            except ValueError as exc:
+                if "benchmark kl_pd is None" not in str(exc):
+                    raise
+                session = SessionLocal()
+                try:
+                    _ensure_symbol_klines(session, fallback_symbol, start, end, n_folds)
+                    market = _market_from_symbol(fallback_symbol)
+                    rows = crud.load_klines(
+                        session,
+                        market,
+                        fallback_symbol,
+                        start=_parse_date_str(start),
+                        end=_parse_date_str(end),
+                    )
+                    df = _kl_df_from_rows(rows)
+                finally:
+                    session.close()
+                if df is None or getattr(df, "empty", False):
+                    raise ValueError("Benchmark data unavailable; run kl_update for selected symbols first.") from exc
+                super().__init__(
+                    benchmark=fallback_symbol,
+                    start=start,
+                    end=end,
+                    n_folds=n_folds,
+                    rs=rs,
+                    benchmark_kl_pd=df,
+                )
+
+    prev = abu_module.AbuBenchmark
+    abu_module.AbuBenchmark = PatchedBenchmark
+    try:
+        yield
+    finally:
+        abu_module.AbuBenchmark = prev
+
+
+def _get_pg_market_source():
+    from abupy.MarketBu.ABuDataBase import StockBaseMarket, SupportMixin
+
+    class PGMarketData(StockBaseMarket, SupportMixin):
+        def minute(self, *args, **kwargs):
+            return None
+
+        def kline(self, n_folds=2, start=None, end=None):
+            from abupy.CoreBu import ABuEnv
+            from abupy.MarketBu.ABuDataSource import source_dict
+
+            session = SessionLocal()
+            try:
+                symbol_value = self._symbol.value
+                market = _market_from_symbol(symbol_value)
+                start_date = _parse_date_str(start)
+                end_date = _parse_date_str(end)
+                rows = crud.load_klines(session, market, symbol_value, start=start_date, end=end_date)
+                if rows:
+                    first = rows[0].trade_date
+                    last = rows[-1].trade_date
+                    if (not start_date or first <= start_date) and (not end_date or last >= end_date):
+                        return _kl_df_from_rows(rows)
+                source_cls = source_dict[ABuEnv.g_market_source.value]
+                df = source_cls(self._symbol).kline(n_folds=n_folds, start=start, end=end)
+                if df is None or getattr(df, "empty", False):
+                    return df
+                rows = _kl_rows_from_df(df, market, symbol_value)
+                crud.upsert_stock_klines(session, rows)
+                return df
+            finally:
+                session.close()
+
+    return PGMarketData
+
+
+@contextmanager
+def _with_pg_data_env(market: str):
+    from abupy.CoreBu import ABuEnv
+    from abupy.CoreBu.ABuEnv import EMarketDataFetchMode
+
+    prev_source = ABuEnv.g_private_data_source
+    prev_mode = ABuEnv.g_data_fetch_mode
+    ABuEnv.g_private_data_source = _get_pg_market_source()
+    ABuEnv.g_data_fetch_mode = EMarketDataFetchMode.E_DATA_FETCH_FORCE_NET
+    try:
+        with _with_market_env(market):
+            yield
+    finally:
+        ABuEnv.g_private_data_source = prev_source
+        ABuEnv.g_data_fetch_mode = prev_mode
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
 def _market_csv_path(market: str) -> Path:
     key = market.upper()
-    if key in {"CN", "SH", "SZ"}:
+    if key in {"CN", "SH", "SZ", "300"}:
         return _repo_root() / "abupy" / "RomDataBu" / "stock_code_CN.csv"
     if key == "HK":
         return _repo_root() / "abupy" / "RomDataBu" / "stock_code_HK.csv"
@@ -127,42 +402,61 @@ def _read_stock_rows(market: str):
                 yield row
 
 
-@tasks_router.get("/", response_model=schemas.APIResponse)
-def list_tasks(db: Session = Depends(get_db)):
-    tasks = crud.get_tasks(db)
-    return schemas.APIResponse(data=[schemas.TaskRead.from_orm(task) for task in tasks])
+def _market_scope(market: str) -> list[str]:
+    key = (market or "CN").upper()
+    if key in {"CN", "ALL", "A"}:
+        return ["SH", "SZ", "300"]
+    return [key]
 
 
-@tasks_router.post("/", response_model=schemas.APIResponse, status_code=status.HTTP_201_CREATED)
-def create_task(payload: schemas.TaskCreate, db: Session = Depends(get_db)):
-    task = crud.create_task(db, payload)
-    return schemas.APIResponse(message="Task created", data=schemas.TaskRead.from_orm(task))
+def _build_symbol_rows(market: str) -> list[dict]:
+    target_market = (market or "CN").upper()
+    rows = []
+    for row in _read_stock_rows(target_market):
+        symbol = (row.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        row_market = (row.get("market") or "").strip().upper()
+        market_value = row_market or target_market
+        if row_market == "SZ" and symbol.startswith("3"):
+            market_value = "300"
+        if target_market in CN_MARKETS or target_market == "CN":
+            if target_market in CN_MARKETS and market_value != target_market:
+                continue
+        elif target_market and market_value != target_market:
+            continue
+        normalized = _normalize_symbol(symbol, market_value)
+        if not normalized:
+            continue
+        exchange = row.get("exchange") or row.get("cc") or None
+        if market_value in {"CN", "SH", "SZ", "300"}:
+            exchange = exchange or row.get("market") or None
+        if isinstance(exchange, str):
+            exchange = exchange.strip() or None
+        rows.append(
+            {
+                "market": market_value,
+                "symbol": normalized,
+                "name": (row.get("co_name") or "").strip() or None,
+                "exchange": exchange,
+                "industry": (row.get("industry") or None),
+            }
+        )
+    return rows
 
 
-@tasks_router.get("/{task_id}", response_model=schemas.APIResponse)
-def get_task(task_id: int, db: Session = Depends(get_db)):
-    task = crud.get_task(db, task_id)
-    if not task:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    return schemas.APIResponse(data=schemas.TaskRead.from_orm(task))
-
-
-@tasks_router.put("/{task_id}", response_model=schemas.APIResponse)
-def update_task(task_id: int, payload: schemas.TaskUpdate, db: Session = Depends(get_db)):
-    task = crud.get_task(db, task_id)
-    if not task:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    task = crud.update_task(db, task, payload)
-    return schemas.APIResponse(message="Task updated", data=schemas.TaskRead.from_orm(task))
-
-
-@tasks_router.delete("/{task_id}", response_model=schemas.APIResponse)
-def delete_task(task_id: int, db: Session = Depends(get_db)):
-    task = crud.get_task(db, task_id)
-    if not task:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-    crud.delete_task(db, task)
-    return schemas.APIResponse(message="Task deleted", data={"id": task_id})
+def _seed_symbols_if_empty(db: Session, market: str) -> int:
+    markets = _market_scope(market)
+    if crud.has_stock_symbols_any(db, markets):
+        return 0
+    total = 0
+    if (market or "").upper() in {"CN", "ALL", "A"}:
+        rows = _build_symbol_rows("CN")
+        total += crud.upsert_stock_symbols(db, rows)
+    else:
+        rows = _build_symbol_rows(market)
+        total += crud.upsert_stock_symbols(db, rows)
+    return total
 
 
 @quant_router.get("/features", response_model=schemas.APIResponse)
@@ -185,49 +479,74 @@ def list_feature_map():
     return schemas.APIResponse(data=data)
 
 
+@quant_router.post("/symbols/import", response_model=schemas.APIResponse)
+def import_symbols(payload: dict, db: Session = Depends(get_db)):
+    market = (payload.get("market") or "CN").upper()
+    rows = _build_symbol_rows(market)
+    count = crud.upsert_stock_symbols(db, rows)
+    return schemas.APIResponse(message="Symbols imported", data={"count": count})
+
+
 @quant_router.get("/symbols", response_model=schemas.APIResponse)
-def search_symbols(market: str = "CN", q: Optional[str] = None, limit: int = 50):
-    limit = max(1, min(limit, 200))
-    query = (q or "").strip().lower()
-    items: list[schemas.SymbolRead] = []
-    for row in _read_stock_rows(market):
-        symbol = (row.get("symbol") or "").strip()
-        name = (row.get("co_name") or "").strip()
-        if not symbol:
-            continue
-        if query:
-            if query not in symbol.lower() and query not in name.lower():
-                continue
-        items.append(
-            schemas.SymbolRead(
-                symbol=symbol,
-                market=(row.get("market") or market).strip(),
-                name=name or None,
-                exchange=(row.get("exchange") or row.get("cc") or None),
-                industry=(row.get("industry") or None),
-            )
+def search_symbols(
+    market: str = "CN",
+    q: Optional[str] = None,
+    kind: str = "stock",
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+):
+    page = max(1, page)
+    page_size = max(1, min(page_size, 200))
+    query = (q or "").strip()
+    market = (market or "CN").upper()
+    markets = _market_scope(market)
+    kind = (kind or "all").strip().lower()
+    if kind not in {"stock", "index", "all"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid kind")
+    items, total = crud.search_stock_symbols(db, markets, query, kind, page, page_size)
+    payload = [
+        schemas.StockSymbolRead(
+            symbol=item.symbol,
+            market=item.market,
+            name=item.name,
+            exchange=item.exchange,
+            industry=item.industry,
+            kind=_symbol_kind(item.symbol, item.name, item.industry),
         )
-        if len(items) >= limit:
-            break
-    return schemas.APIResponse(data=items)
+        for item in items
+    ]
+    return schemas.APIResponse(
+        data={
+            "items": payload,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
+    )
 
 
 @quant_router.get("/symbols/{symbol}", response_model=schemas.APIResponse)
-def get_symbol(symbol: str, market: str = "CN"):
-    want = symbol.strip().lower()
-    for row in _read_stock_rows(market):
-        sym = (row.get("symbol") or "").strip()
-        if sym.lower() == want:
-            return schemas.APIResponse(
-                data=schemas.SymbolRead(
-                    symbol=sym,
-                    market=(row.get("market") or market).strip(),
-                    name=(row.get("co_name") or "").strip() or None,
-                    exchange=(row.get("exchange") or row.get("cc") or None),
-                    industry=(row.get("industry") or None),
-                )
-            )
-    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Symbol not found")
+def get_symbol(symbol: str, market: str = "CN", db: Session = Depends(get_db)):
+    market = (market or "CN").upper()
+    want = symbol.strip()
+    item = None
+    for market_key in _market_scope(market):
+        item = crud.get_stock_symbol(db, market_key, want)
+        if item:
+            break
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Symbol not found")
+    return schemas.APIResponse(
+        data=schemas.StockSymbolRead(
+            symbol=item.symbol,
+            market=item.market,
+            name=item.name,
+            exchange=item.exchange,
+            industry=item.industry,
+            kind=_symbol_kind(item.symbol, item.name, item.industry),
+        )
+    )
 
 
 def _run_job(job_id: int):
@@ -239,23 +558,51 @@ def _run_job(job_id: int):
         crud.set_quant_job_running(db, job)
 
         if job.type == "kl_update":
-            from abupy import abu, EMarketTargetType
+            from abupy.MarketBu import ABuSymbolPd
 
             market = (job.params.get("market") or "CN").upper()
-            market_map = {
-                "CN": EMarketTargetType.E_MARKET_TARGET_CN,
-                "US": EMarketTargetType.E_MARKET_TARGET_US,
-                "HK": EMarketTargetType.E_MARKET_TARGET_HK,
-            }
-            abu.run_kl_update(
-                n_folds=job.params.get("n_folds", 1),
-                start=job.params.get("start"),
-                end=job.params.get("end"),
-                market=market_map.get(market),
-                n_jobs=job.params.get("n_jobs", 8),
-                how=job.params.get("how", "thread"),
+            raw_symbols = job.params.get("symbols")
+            symbols = _normalize_symbols(raw_symbols, market)
+            seeded = 0
+            if job.params.get("all"):
+                seeded = _seed_symbols_if_empty(db, market)
+                market_keys = _market_scope(market)
+                symbols = [
+                    _normalize_symbol(item.symbol, market)
+                    for item in crud.list_stock_symbols_by_markets(db, market_keys)
+                ]
+                symbols = [item for item in symbols if item]
+            if not symbols:
+                raise RuntimeError("No symbols available; import symbols into database first.")
+
+            n_folds = job.params.get("n_folds", 1)
+            start = job.params.get("start")
+            end = job.params.get("end")
+            total_rows = 0
+            updated_symbols = 0
+            missing_symbols = []
+            with _with_market_env(market):
+                for symbol in symbols:
+                    kl = ABuSymbolPd.make_kl_df(symbol, n_folds=n_folds, start=start, end=end)
+                    if kl is None or getattr(kl, "empty", False):
+                        missing_symbols.append(symbol)
+                        continue
+                    rows = _kl_rows_from_df(kl, _market_from_symbol(symbol), symbol)
+                    total_rows += crud.upsert_stock_klines(db, rows)
+                    updated_symbols += 1
+
+            crud.set_quant_job_result(
+                db,
+                job,
+                {
+                    "message": "kl_update finished",
+                    "symbols": symbols,
+                    "rows": total_rows,
+                    "seeded_symbols": seeded,
+                    "updated_symbols": updated_symbols,
+                    "missing_symbols": missing_symbols[:200],
+                },
             )
-            crud.set_quant_job_result(db, job, {"message": "kl_update finished"})
             return
 
         if job.type == "backtest":
@@ -265,6 +612,10 @@ def _run_job(job_id: int):
 
             market = (job.params.get("market") or "CN").upper()
             symbols = _normalize_symbols(job.params.get("symbols"), market)
+            if not symbols:
+                raise RuntimeError("No symbols specified for backtest.")
+            benchmark_symbol = _resolve_benchmark_symbol(market)
+            _ensure_symbol_klines(db, benchmark_symbol, job.params.get("start"), job.params.get("end"), job.params.get("n_folds", 1))
             buy_factors = [{"class": AbuFactorBuyBreak, "xd": job.params.get("buy_xd", 42)}]
             sell_factors = [
                 {
@@ -273,7 +624,8 @@ def _run_job(job_id: int):
                     "stop_win_n": job.params.get("stop_win_n", 3.0),
                 }
             ]
-            with _with_market_env(market):
+            fallback_symbol = symbols[0] if symbols else None
+            with _with_pg_data_env(market), _with_benchmark_fallback(fallback_symbol):
                 abu_result, _ = abu.run_loop_back(
                     read_cash=job.params.get("cash", 1000000),
                     buy_factors=buy_factors,
@@ -332,6 +684,10 @@ def _run_job(job_id: int):
             n_folds = job.params.get("n_folds", 1)
             start = job.params.get("start")
             end = job.params.get("end")
+            if not symbols:
+                raise RuntimeError("No symbols specified for grid search.")
+            benchmark_symbol = _resolve_benchmark_symbol(market)
+            _ensure_symbol_klines(db, benchmark_symbol, start, end, n_folds)
 
             buy_xd_list = job.params.get("buy_xd_list") or [20, 42, 60]
             stop_loss_n_list = job.params.get("stop_loss_n_list") or [0.5, 1.0]
@@ -340,7 +696,8 @@ def _run_job(job_id: int):
             max_runs = max(1, min(max_runs, 200))
 
             runs = []
-            with _with_market_env(market):
+            fallback_symbol = symbols[0] if symbols else None
+            with _with_pg_data_env(market), _with_benchmark_fallback(fallback_symbol):
                 for i, (buy_xd, stop_loss_n, stop_win_n) in enumerate(
                     product(buy_xd_list, stop_loss_n_list, stop_win_n_list)
                 ):
@@ -387,7 +744,7 @@ def _run_job(job_id: int):
             return
 
         if job.type == "analysis":
-            result = _run_analysis_job(job.params)
+            result = _run_analysis_job(job.params, db)
             crud.set_quant_job_result(db, job, result)
             return
 
@@ -464,14 +821,19 @@ def _series_points(series, limit: int = 200):
     return points
 
 
-def _run_analysis_job(params: dict) -> dict:
+def _run_analysis_job(params: dict, db: Session) -> dict:
     import numpy as np
     import pandas as pd
-    from abupy.MarketBu import ABuSymbolPd
     from abupy.TLineBu import AbuTLine, EShiftDistanceHow
-    from abupy.TLineBu.ABuTLExecute import calc_pair_speed, find_golden_point, find_golden_point_ex, regress_trend_channel
+    from abupy.TLineBu.ABuTLExecute import (
+        calc_kl_speed,
+        find_golden_point,
+        find_golden_point_ex,
+        regress_trend_channel,
+    )
+    from abupy.SimilarBu import ABuCorrcoef, ECoreCorrType
     from abupy.TLineBu.ABuTLJump import calc_jump, calc_jump_line, calc_jump_line_weight
-    from abupy.SimilarBu.ABuCorrcoef import corr_matrix, ECoreCorrType
+    from abupy.SimilarBu.ABuCorrcoef import corr_matrix
     from abupy.UtilBu import ABuKLUtil
     from abupy.UtilBu.ABuStatsUtil import (
         manhattan_distance_matrix,
@@ -488,8 +850,19 @@ def _run_analysis_job(params: dict) -> dict:
     limit = int(params.get("limit", 200))
     options = params.get("options") or {}
 
+    def _resolve_dates():
+        if start or end:
+            start_date = datetime.strptime(start, "%Y-%m-%d").date() if start else None
+            end_date = datetime.strptime(end, "%Y-%m-%d").date() if end else None
+            return start_date, end_date
+        end_date = date.today()
+        start_date = end_date - timedelta(days=365 * int(n_folds))
+        return start_date, end_date
+
     def _fetch_kl(symbol: str):
-        return ABuSymbolPd.make_kl_df(symbol, n_folds=n_folds, start=start, end=end)
+        start_date, end_date = _resolve_dates()
+        rows = crud.load_klines(db, market, symbol, start=start_date, end=end_date)
+        return _kl_df_from_rows(rows)
 
     def _fetch_kl_dict(items: list[str]):
         data = {}
@@ -577,16 +950,13 @@ def _run_analysis_job(params: dict) -> dict:
             benchmark = _normalize_symbol(benchmark, market) or DEFAULT_BENCHMARKS.get(market, DEFAULT_SYMBOLS["US"][0])
             resample = int(options.get("resample", 5))
             speed_key = options.get("speed_key", "close")
-            speed, benchmark_speed, corr = calc_pair_speed(
-                symbol,
-                benchmark,
-                resample=resample,
-                speed_key=speed_key,
-                start=start,
-                end=end,
-                n_folds=n_folds,
-                show=False,
-            )
+            kl = _fetch_kl(symbol)
+            benchmark_kl = _fetch_kl(benchmark)
+            if kl is None or benchmark_kl is None:
+                raise RuntimeError("Missing kline data for speed comparison")
+            speed = calc_kl_speed(kl[speed_key], resample)
+            benchmark_speed = calc_kl_speed(benchmark_kl[speed_key], resample)
+            corr = ABuCorrcoef.corr_xy(kl.close, benchmark_kl.close, ECoreCorrType.E_CORE_TYPE_SPERM)
             return {
                 "tool": tool,
                 "symbol": symbol,
@@ -792,6 +1162,17 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
     return schemas.APIResponse(data=schemas.QuantJobRead.from_orm(job))
 
 
+@jobs_router.delete("/{job_id}", response_model=schemas.APIResponse)
+def delete_job(job_id: int, db: Session = Depends(get_db)):
+    job = crud.get_quant_job(db, job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    if job.status == "running":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is running")
+    crud.delete_quant_job(db, job)
+    return schemas.APIResponse(message="Job deleted", data={"id": job_id})
+
+
 @jobs_router.get("/{job_id}/export")
 def export_job(job_id: int, format: str = "json", section: Optional[str] = None, db: Session = Depends(get_db)):
     job = crud.get_quant_job(db, job_id)
@@ -854,6 +1235,5 @@ def export_job(job_id: int, format: str = "json", section: Optional[str] = None,
     )
 
 
-router.include_router(tasks_router)
 router.include_router(quant_router)
 router.include_router(jobs_router)

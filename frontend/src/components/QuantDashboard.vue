@@ -47,19 +47,30 @@
           <div>
             <label class="label">市场</label>
             <select v-model="market" class="select">
-              <option value="CN">CN</option>
-              <option value="HK">HK</option>
-              <option value="US">US</option>
+              <option value="SH">SH (Shanghai)</option>
+              <option value="SZ">SZ (Shenzhen)</option>
+              <option value="300">300 (ChiNext)</option>
             </select>
           </div>
           <div>
             <label class="label">关键词</label>
             <input v-model="query" placeholder="symbol / 公司名 / 关键字" @keyup.enter="search" />
           </div>
+          <div>
+            <label class="label">类型</label>
+            <select v-model="kind" class="select">
+              <option value="stock">个股</option>
+              <option value="index">指数</option>
+              <option value="all">全部</option>
+            </select>
+          </div>
         </div>
         <div class="toolbar">
           <button class="btn-secondary" @click="search" :disabled="store.symbolsLoading">查询</button>
+          <button class="btn-ghost" @click="importSymbols" :disabled="store.symbolsLoading">初始化当前市场</button>
+          <button class="btn-ghost" @click="importAllSymbols" :disabled="store.symbolsLoading">导入全部A股</button>
           <span class="muted">{{ store.symbolsLoading ? '加载中…' : ' ' }}</span>
+          <span v-if="selectedSymbols.length" class="muted">已选 {{ selectedSymbols.length }} 只</span>
         </div>
         <p v-if="store.symbolsError" class="error">{{ store.symbolsError }}</p>
         <div class="table-wrap" v-if="!store.symbolsLoading">
@@ -68,6 +79,7 @@
               <tr>
                 <th>Symbol</th>
                 <th>Market</th>
+                <th>Type</th>
                 <th>Name</th>
                 <th>Exchange</th>
                 <th>Industry</th>
@@ -76,20 +88,55 @@
             </thead>
             <tbody>
               <tr v-for="item in store.symbols" :key="`${item.market}-${item.symbol}`">
-                <td class="mono">{{ item.symbol }}</td>
+                <td class="mono">{{ displaySymbol(item) }}</td>
                 <td>{{ item.market }}</td>
+                <td>{{ displayKind(item.kind) }}</td>
                 <td>{{ item.name || '-' }}</td>
                 <td>{{ item.exchange || '-' }}</td>
                 <td>{{ item.industry || '-' }}</td>
                 <td>
-                  <button class="btn-ghost" @click="useSymbol(item.symbol)">使用</button>
+                  <button class="btn-ghost" @click="toggleSymbol(item.symbol)">
+                    {{ isSelected(item.symbol) ? '移除' : '使用' }}
+                  </button>
                 </td>
               </tr>
               <tr v-if="store.symbols.length === 0">
-                <td colspan="6" class="muted">暂无结果</td>
+                <td colspan="7" class="muted">暂无结果</td>
               </tr>
             </tbody>
           </table>
+        </div>
+        <div v-if="selectedSymbols.length" class="selection">
+          <div class="selection-head">
+            <span class="pill">选股篮</span>
+            <button class="btn-secondary" @click="clearSymbols">清空</button>
+          </div>
+          <div class="selection-chips">
+            <button v-for="symbol in selectedSymbols" :key="symbol" class="chip" @click="removeSymbol(symbol)">
+              {{ symbol }}
+              <span class="chip-close">×</span>
+            </button>
+          </div>
+        </div>
+        <div class="pager">
+          <span class="muted">共 {{ store.total }} 条</span>
+          <div class="pager-controls">
+            <button class="btn-secondary" @click="changePage(store.page - 1)" :disabled="store.page <= 1">
+              上一页
+            </button>
+            <span class="mono">{{ store.page }} / {{ totalPages }}</span>
+            <button class="btn-secondary" @click="changePage(store.page + 1)" :disabled="store.page >= totalPages">
+              下一页
+            </button>
+          </div>
+          <div class="pager-size">
+            <span class="muted">每页</span>
+            <select v-model.number="pageSize" class="select" @change="applyPageSize">
+              <option :value="20">20</option>
+              <option :value="50">50</option>
+              <option :value="100">100</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -131,6 +178,16 @@
           <button class="btn-primary" @click="runKlUpdate" :disabled="actionsBusy">启动更新</button>
           <span class="muted">将创建异步任务</span>
         </div>
+        <div class="update-targets">
+          <p class="muted">更新标的</p>
+          <div v-if="selectedSymbols.length" class="selection-chips">
+            <button v-for="symbol in selectedSymbols" :key="symbol" class="chip" @click="removeSymbol(symbol)">
+              {{ symbol }}
+              <span class="chip-close">×</span>
+            </button>
+          </div>
+          <p v-else class="muted">全量更新当前市场</p>
+        </div>
       </div>
     </section>
 
@@ -146,7 +203,7 @@
         <div class="form-grid">
           <div>
             <label class="label">标的列表</label>
-            <input v-model="backtestForm.symbols" placeholder="usAAPL, usTSLA" />
+            <input v-model="backtestForm.symbols" placeholder="sh600036, sz000001" />
           </div>
           <div>
             <label class="label">初始资金</label>
@@ -211,7 +268,7 @@
         <div class="form-grid">
           <div>
             <label class="label">标的列表</label>
-            <input v-model="gridForm.symbols" placeholder="usAAPL, usTSLA" />
+            <input v-model="gridForm.symbols" placeholder="sh600036, sz000001" />
           </div>
           <div>
             <label class="label">初始资金</label>
@@ -290,7 +347,7 @@
             </div>
             <div>
               <label class="label">标的列表</label>
-              <input v-model="toolForm.symbols" placeholder="usAAPL, usTSLA" />
+              <input v-model="toolForm.symbols" placeholder="sh600036, sz000001" />
             </div>
             <div>
               <label class="label">回溯年数</label>
@@ -499,6 +556,7 @@
                     行为 CSV
                   </a>
                   <button class="btn-secondary" @click="selectJob(job.id)">详情</button>
+                  <button class="btn-secondary" @click="removeJob(job)" :disabled="job.status === 'running'">删除</button>
                 </div>
               </td>
             </tr>
@@ -511,19 +569,51 @@
 
       <div v-if="store.activeJob" class="result-card">
         <h3>任务详情</h3>
-        <pre class="code">{{ activeJobText }}</pre>
+        <div class="result-grid">
+          <div>
+            <p class="muted">任务编号</p>
+            <p class="metric-value">#{{ store.activeJob.id }}</p>
+          </div>
+          <div>
+            <p class="muted">任务类型</p>
+            <p class="metric-value">{{ store.activeJob.type }}</p>
+          </div>
+          <div>
+            <p class="muted">状态</p>
+            <p class="metric-value">{{ store.activeJob.status }}</p>
+          </div>
+          <div>
+            <p class="muted">更新时间</p>
+            <p class="metric-value">{{ formatTime(store.activeJob.updated_at) }}</p>
+          </div>
+        </div>
+        <div class="code-wrap" v-if="store.activeJob.params">
+          <p class="muted">参数</p>
+          <pre class="code">{{ activeParamsText }}</pre>
+        </div>
+        <div class="code-wrap" v-if="store.activeJob.result">
+          <p class="muted">结果</p>
+          <pre class="code">{{ activeResultText }}</pre>
+        </div>
+        <div class="code-wrap" v-if="store.activeJob.error">
+          <p class="muted">错误</p>
+          <pre class="code">{{ activeErrorText }}</pre>
+        </div>
       </div>
     </section>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useQuantStore } from '../stores/quantStore'
 
 const store = useQuantStore()
 const market = ref(store.market)
 const query = ref(store.query)
+const kind = ref(store.kind)
+const pageSize = ref(store.pageSize)
+const selectedSymbols = ref([])
 
 const updateForm = reactive({
   market: market.value,
@@ -531,7 +621,8 @@ const updateForm = reactive({
   start: '',
   end: '',
   n_jobs: 8,
-  how: 'thread'
+  how: 'thread',
+  symbols: ''
 })
 
 const backtestForm = reactive({
@@ -592,6 +683,9 @@ const actionsBusy = computed(
 )
 
 const defaultSymbolForMarket = (value) => {
+  if (value === 'SH') return 'sh600036'
+  if (value === 'SZ') return 'sz000001'
+  if (value === '300') return 'sz300750'
   if (value === 'US') return 'usAAPL'
   if (value === 'HK') return 'hk00700'
   return 'sh600036'
@@ -645,8 +739,14 @@ const analysisText = computed(() =>
   analysisResult.value ? JSON.stringify(analysisResult.value, null, 2) : ''
 )
 
-const activeJobText = computed(() =>
-  store.activeJob ? JSON.stringify(store.activeJob, null, 2) : ''
+const activeParamsText = computed(() =>
+  store.activeJob?.params ? JSON.stringify(store.activeJob.params, null, 2) : ''
+)
+const activeResultText = computed(() =>
+  store.activeJob?.result ? JSON.stringify(store.activeJob.result, null, 2) : ''
+)
+const activeErrorText = computed(() =>
+  store.activeJob?.error ? String(store.activeJob.error) : ''
 )
 
 const toolOptionMode = computed(() => {
@@ -659,6 +759,8 @@ const toolOptionMode = computed(() => {
   if (toolForm.tool === 'distance') return 'distance'
   return 'base'
 })
+
+const totalPages = computed(() => Math.max(1, Math.ceil(store.total / store.pageSize)))
 
 const formatTime = (v) => {
   if (!v) return '-'
@@ -684,7 +786,39 @@ const parseNumberList = (raw) =>
     .filter((item) => Number.isFinite(item))
 
 const search = async () => {
-  await store.searchSymbols({ market: market.value, q: query.value })
+  await store.searchSymbols({
+    market: market.value,
+    q: query.value,
+    kind: kind.value,
+    page: 1,
+    pageSize: pageSize.value
+  })
+}
+
+const importSymbols = async () => {
+  const data = await store.importSymbols(market.value)
+  if (data) {
+    await store.searchSymbols({
+      market: market.value,
+      q: query.value,
+      kind: kind.value,
+      page: 1,
+      pageSize: pageSize.value
+    })
+  }
+}
+
+const importAllSymbols = async () => {
+  const data = await store.importSymbols('CN')
+  if (data) {
+    await store.searchSymbols({
+      market: market.value,
+      q: query.value,
+      kind: kind.value,
+      page: 1,
+      pageSize: pageSize.value
+    })
+  }
 }
 
 const refreshJobs = async () => {
@@ -695,6 +829,11 @@ const selectJob = async (id) => {
   await store.fetchJob(id)
 }
 
+const removeJob = async (job) => {
+  if (job.status === 'running') return
+  await store.deleteJob(job.id)
+}
+
 const exportUrl = (id, format, section) => {
   const params = new URLSearchParams()
   if (format) params.set('format', format)
@@ -703,10 +842,74 @@ const exportUrl = (id, format, section) => {
   return `/api/v1/jobs/${encodeURIComponent(String(id))}/export${qs ? `?${qs}` : ''}`
 }
 
-const useSymbol = (symbol) => {
-  backtestForm.symbols = symbol
-  gridForm.symbols = symbol
-  toolForm.symbols = symbol
+const addSymbol = (symbol) => {
+  if (!symbol || selectedSymbols.value.includes(symbol)) return
+  selectedSymbols.value = [...selectedSymbols.value, symbol]
+  syncSelectedSymbols()
+}
+
+const displaySymbol = (item) => {
+  if (!item || !item.symbol) return ''
+  const lower = item.symbol.toLowerCase()
+  if (lower.startsWith('sh') || lower.startsWith('sz')) {
+    return item.symbol.slice(2)
+  }
+  return item.symbol
+}
+
+const displayKind = (kind) => {
+  if (kind === 'index') return '指数'
+  if (kind === 'stock') return '个股'
+  return '-'
+}
+
+const isSelected = (symbol) => selectedSymbols.value.includes(symbol)
+
+const toggleSymbol = (symbol) => {
+  if (isSelected(symbol)) {
+    removeSymbol(symbol)
+    return
+  }
+  addSymbol(symbol)
+}
+
+const removeSymbol = (symbol) => {
+  selectedSymbols.value = selectedSymbols.value.filter((item) => item !== symbol)
+  syncSelectedSymbols()
+}
+
+const clearSymbols = () => {
+  selectedSymbols.value = []
+  syncSelectedSymbols()
+}
+
+const syncSelectedSymbols = () => {
+  const text = selectedSymbols.value.join(', ')
+  backtestForm.symbols = text
+  gridForm.symbols = text
+  toolForm.symbols = text
+  updateForm.symbols = text
+}
+
+const changePage = async (nextPage) => {
+  if (nextPage < 1 || nextPage > totalPages.value) return
+  await store.searchSymbols({
+    market: market.value,
+    q: query.value,
+    kind: kind.value,
+    page: nextPage,
+    pageSize: pageSize.value
+  })
+}
+
+const applyPageSize = async () => {
+  await store.searchSymbols({
+    market: market.value,
+    q: query.value,
+    kind: kind.value,
+    page: 1,
+    pageSize: pageSize.value
+  })
 }
 
 const runVerify = async () => {
@@ -715,13 +918,16 @@ const runVerify = async () => {
 }
 
 const runKlUpdate = async () => {
+  const symbols = selectedSymbols.value.length ? selectedSymbols.value.join(',') : ''
   const job = await store.startKlUpdate({
     market: updateForm.market,
     n_folds: updateForm.n_folds,
     start: updateForm.start || undefined,
     end: updateForm.end || undefined,
     how: updateForm.how,
-    n_jobs: updateForm.n_jobs
+    n_jobs: updateForm.n_jobs,
+    symbols: symbols || undefined,
+    all: !symbols
   })
   await store.fetchJob(job.id)
 }
@@ -803,18 +1009,16 @@ const runTool = async () => {
   await store.fetchJob(job.id)
 }
 
-let timer = null
 onMounted(async () => {
-  await Promise.all([store.fetchJobs(), store.searchSymbols({ market: market.value, q: query.value })])
-  timer = setInterval(async () => {
-    await store.fetchJobs()
-    if (store.activeJob?.id) {
-      await store.fetchJob(store.activeJob.id)
-    }
-  }, 2500)
-})
-
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
+  await Promise.all([
+    store.fetchJobs(),
+    store.searchSymbols({
+      market: market.value,
+      q: query.value,
+      kind: kind.value,
+      page: store.page,
+      pageSize: store.pageSize
+    })
+  ])
 })
 </script>

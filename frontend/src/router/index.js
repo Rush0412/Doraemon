@@ -1,12 +1,11 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import TaskBoard from '../components/TaskBoard.vue'
 import QuantDashboard from '../components/QuantDashboard.vue'
 
 const routes = [
   {
     path: '/',
     name: 'home',
-    component: TaskBoard
+    component: QuantDashboard
   },
   {
     path: '/quant',

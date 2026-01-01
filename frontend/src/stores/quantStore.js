@@ -3,8 +3,12 @@ import { api } from '../services/api'
 
 export const useQuantStore = defineStore('quant', {
   state: () => ({
-    market: 'CN',
+    market: 'SH',
     query: '',
+    kind: 'stock',
+    page: 1,
+    pageSize: 20,
+    total: 0,
     symbols: [],
     symbolsLoading: false,
     symbolsError: null,
@@ -15,19 +19,35 @@ export const useQuantStore = defineStore('quant', {
     activeJobLoading: false
   }),
   actions: {
-    async searchSymbols({ market, q, limit = 50 } = {}) {
+    async searchSymbols({ market, q, kind, page, pageSize } = {}) {
       const nextMarket = market ?? this.market
       const nextQuery = q ?? this.query
+      const nextKind = kind ?? this.kind
+      const nextPage = page ?? this.page
+      const nextPageSize = pageSize ?? this.pageSize
       this.market = nextMarket
       this.query = nextQuery
+      this.kind = nextKind
+      this.page = nextPage
+      this.pageSize = nextPageSize
 
       this.symbolsLoading = true
       this.symbolsError = null
       try {
         const { data } = await api.get('/quant/symbols', {
-          params: { market: nextMarket, q: nextQuery, limit }
+          params: {
+            market: nextMarket,
+            q: nextQuery,
+            kind: nextKind,
+            page: nextPage,
+            page_size: nextPageSize
+          }
         })
-        this.symbols = data.data || []
+        const payload = data.data || {}
+        this.symbols = payload.items || []
+        this.total = payload.total || 0
+        this.page = payload.page || nextPage
+        this.pageSize = payload.page_size || nextPageSize
       } catch (err) {
         this.symbolsError = err.message
       } finally {
@@ -55,6 +75,13 @@ export const useQuantStore = defineStore('quant', {
         this.activeJobLoading = false
       }
     },
+    async deleteJob(id) {
+      await api.delete(`/jobs/${id}`)
+      this.jobs = this.jobs.filter((job) => job.id !== id)
+      if (this.activeJob?.id === id) {
+        this.activeJob = null
+      }
+    },
     async startVerify() {
       const { data } = await api.get('/quant/verify')
       const job = data.data
@@ -75,6 +102,19 @@ export const useQuantStore = defineStore('quant', {
       this.activeJob = job
       await this.fetchJobs()
       return job
+    },
+    async importSymbols(market = 'CN') {
+      this.symbolsLoading = true
+      this.symbolsError = null
+      try {
+        const { data } = await api.post('/quant/symbols/import', { market })
+        return data.data
+      } catch (err) {
+        this.symbolsError = err.message
+        return null
+      } finally {
+        this.symbolsLoading = false
+      }
     },
     async startGridSearch(params = {}) {
       const { data } = await api.post('/quant/grid-search', params)
