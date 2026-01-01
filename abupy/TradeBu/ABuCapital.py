@@ -157,17 +157,19 @@ class AbuCapital(PickleStateMixin):
             :param buy_type_head: 代表交易类型，范围（_call，_put）
             """
             # cash_blance对na进行pad处理
-            self.capital_pd['cash_blance'].fillna(method='pad', inplace=True)
+            self.capital_pd['cash_blance'] = self.capital_pd['cash_blance'].ffill()
             # symbol对应列持仓量对na进行处理
-            self.capital_pd[kl_pd.name + buy_type_head + '_keep'].fillna(method='pad', inplace=True)
-            self.capital_pd[kl_pd.name + buy_type_head + '_keep'].fillna(0, inplace=True)
+            keep_col = kl_pd.name + buy_type_head + '_keep'
+            self.capital_pd[keep_col] = self.capital_pd[keep_col].ffill()
+            self.capital_pd[keep_col] = self.capital_pd[keep_col].fillna(0)
 
             # 使用apply在axis＝1上，即每一个交易日上对持仓量及市场价值进行更新
             self.capital_pd.apply(self.apply_k_line, axis=1, args=(kl_pd, buy_type_head))
 
             # symbol对应列市场价值对na进行处理
-            self.capital_pd[kl_pd.name + buy_type_head + '_worth'].fillna(method='pad', inplace=True)
-            self.capital_pd[kl_pd.name + buy_type_head + '_worth'].fillna(0, inplace=True)
+            worth_col = kl_pd.name + buy_type_head + '_worth'
+            self.capital_pd[worth_col] = self.capital_pd[worth_col].ffill()
+            self.capital_pd[worth_col] = self.capital_pd[worth_col].fillna(0)
 
             # 纠错处理把keep=0但是worth被pad的进行二次修正
             fe_mask = (self.capital_pd[kl_pd.name + buy_type_head + '_keep'] == 0) & (

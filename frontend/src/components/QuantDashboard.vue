@@ -69,6 +69,8 @@
           <button class="btn-secondary" @click="search" :disabled="store.symbolsLoading">查询</button>
           <button class="btn-ghost" @click="importSymbols" :disabled="store.symbolsLoading">初始化当前市场</button>
           <button class="btn-ghost" @click="importAllSymbols" :disabled="store.symbolsLoading">导入全部A股</button>
+          <button class="btn-ghost" @click="selectPage" :disabled="store.symbolsLoading">全选当前页</button>
+          <button class="btn-ghost" @click="invertPage" :disabled="store.symbolsLoading">反选当前页</button>
           <span class="muted">{{ store.symbolsLoading ? '加载中…' : ' ' }}</span>
           <span v-if="selectedSymbols.length" class="muted">已选 {{ selectedSymbols.length }} 只</span>
         </div>
@@ -109,7 +111,18 @@
         <div v-if="selectedSymbols.length" class="selection">
           <div class="selection-head">
             <span class="pill">选股篮</span>
-            <button class="btn-secondary" @click="clearSymbols">清空</button>
+            <div class="selection-actions">
+              <button class="btn-secondary" @click="clearSymbols">清空</button>
+              <button class="btn-secondary" @click="saveSelection">保存组合</button>
+            </div>
+          </div>
+          <div class="selection-load">
+            <select v-model="selectedPortfolio" class="select">
+              <option value="">加载组合</option>
+              <option v-for="name in savedPortfolios" :key="name" :value="name">{{ name }}</option>
+            </select>
+            <button class="btn-secondary" @click="loadPortfolio" :disabled="!selectedPortfolio">加载</button>
+            <button class="btn-secondary" @click="deletePortfolio" :disabled="!selectedPortfolio">删除</button>
           </div>
           <div class="selection-chips">
             <button v-for="symbol in selectedSymbols" :key="symbol" class="chip" @click="removeSymbol(symbol)">
@@ -614,6 +627,8 @@ const query = ref(store.query)
 const kind = ref(store.kind)
 const pageSize = ref(store.pageSize)
 const selectedSymbols = ref([])
+const savedPortfolios = ref([])
+const selectedPortfolio = ref('')
 
 const updateForm = reactive({
   market: market.value,
@@ -883,6 +898,65 @@ const clearSymbols = () => {
   syncSelectedSymbols()
 }
 
+const selectPage = () => {
+  const pageSymbols = store.symbols.map((item) => item.symbol)
+  const merged = new Set([...selectedSymbols.value, ...pageSymbols])
+  selectedSymbols.value = Array.from(merged)
+  syncSelectedSymbols()
+}
+
+const invertPage = () => {
+  const pageSymbols = new Set(store.symbols.map((item) => item.symbol))
+  const next = selectedSymbols.value.filter((symbol) => !pageSymbols.has(symbol))
+  for (const symbol of pageSymbols) {
+    if (!selectedSymbols.value.includes(symbol)) {
+      next.push(symbol)
+    }
+  }
+  selectedSymbols.value = next
+  syncSelectedSymbols()
+}
+
+const saveSelection = () => {
+  const name = window.prompt('保存组合名称')
+  if (!name) return
+  const trimmed = name.trim()
+  if (!trimmed) return
+  const payload = { name: trimmed, symbols: selectedSymbols.value }
+  localStorage.setItem(`doraemon_portfolio_${trimmed}`, JSON.stringify(payload))
+  const indexKey = 'doraemon_portfolios'
+  const list = JSON.parse(localStorage.getItem(indexKey) || '[]')
+  if (!list.includes(trimmed)) list.push(trimmed)
+  localStorage.setItem(indexKey, JSON.stringify(list))
+  savedPortfolios.value = list
+  selectedPortfolio.value = trimmed
+}
+
+const loadPortfolio = () => {
+  if (!selectedPortfolio.value) return
+  const raw = localStorage.getItem(`doraemon_portfolio_${selectedPortfolio.value}`)
+  if (!raw) return
+  try {
+    const parsed = JSON.parse(raw)
+    selectedSymbols.value = Array.isArray(parsed.symbols) ? parsed.symbols : []
+    syncSelectedSymbols()
+  } catch {
+    // ignore malformed payload
+  }
+}
+
+const deletePortfolio = () => {
+  if (!selectedPortfolio.value) return
+  localStorage.removeItem(`doraemon_portfolio_${selectedPortfolio.value}`)
+  const indexKey = 'doraemon_portfolios'
+  const list = JSON.parse(localStorage.getItem(indexKey) || '[]').filter(
+    (name) => name !== selectedPortfolio.value
+  )
+  localStorage.setItem(indexKey, JSON.stringify(list))
+  savedPortfolios.value = list
+  selectedPortfolio.value = ''
+}
+
 const syncSelectedSymbols = () => {
   const text = selectedSymbols.value.join(', ')
   backtestForm.symbols = text
@@ -1010,6 +1084,7 @@ const runTool = async () => {
 }
 
 onMounted(async () => {
+  savedPortfolios.value = JSON.parse(localStorage.getItem('doraemon_portfolios') || '[]')
   await Promise.all([
     store.fetchJobs(),
     store.searchSymbols({

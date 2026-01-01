@@ -141,6 +141,16 @@ def _parse_trade_date(value) -> Optional[date]:
         return value.date()
     if isinstance(value, date):
         return value
+    if isinstance(value, str):
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
+            try:
+                return datetime.strptime(value, fmt).date()
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(value).date()
+        except ValueError:
+            return None
     try:
         value = int(value)
         return datetime.strptime(str(value), "%Y%m%d").date()
@@ -151,13 +161,58 @@ def _parse_trade_date(value) -> Optional[date]:
 def _parse_date_str(value: Optional[str]) -> Optional[date]:
     if not value:
         return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
     try:
         return datetime.strptime(value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.strptime(value, "%Y%m%d").date()
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.strptime(value, "%Y/%m/%d").date()
     except (TypeError, ValueError):
         return None
 
 
+def _date_to_int(value) -> Optional[int]:
+    dt = _parse_trade_date(value)
+    if dt is None:
+        return None
+    return int(dt.strftime("%Y%m%d"))
+
+
+def _date_week_from_int(value) -> Optional[int]:
+    try:
+        return datetime.strptime(str(int(value)), "%Y%m%d").weekday()
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_date_range(start: Optional[str], end: Optional[str], n_folds: int) -> tuple[date, date]:
+    today = date.today()
+    end_date = _parse_date_str(end) or today
+    if end_date > today:
+        end_date = today
+    folds = max(1, int(n_folds or 1))
+    start_date = _parse_date_str(start)
+    if start_date is None:
+        start_date = end_date - timedelta(days=365 * folds)
+    if start_date > end_date:
+        start_date = end_date - timedelta(days=365 * folds)
+    return start_date, end_date
+
+
 def _kl_rows_from_df(df, market: str, symbol: str) -> list[dict]:
+    if df is None or getattr(df, "empty", False):
+        return []
+    df = _normalize_kl_df(df)
+    if df is None or getattr(df, "empty", False):
+        return []
     rows = []
     for _, row in df.iterrows():
         trade_date = _parse_trade_date(row.get("date")) or _parse_trade_date(getattr(row, "name", None))
@@ -211,6 +266,20 @@ def _kl_df_from_rows(rows: list) -> Optional["pandas.DataFrame"]:
     df = pd.DataFrame(data)
     df.sort_values("date", inplace=True)
     df.reset_index(drop=True, inplace=True)
+    if "pre_close" not in df.columns or df["pre_close"].isna().all():
+        df["pre_close"] = df["close"].shift(1)
+        df.loc[df["pre_close"].isna(), "pre_close"] = df["open"]
+    if "p_change" not in df.columns or df["p_change"].isna().all():
+        base = df["pre_close"].replace(0, float("nan"))
+        df["p_change"] = (df["close"] - df["pre_close"]) / base * 100
+        df["p_change"] = df["p_change"].fillna(0)
+    if "date_week" not in df.columns or df["date_week"].isna().all():
+        df["date_week"] = df["date"].apply(_date_week_from_int)
+    if "key" not in df.columns or df["key"].isna().all():
+        df["key"] = list(range(len(df)))
+    for col in ("atr14", "atr21"):
+        if col in df.columns and df[col].isna().all():
+            df.drop(columns=[col], inplace=True)
     df.index = pd.to_datetime(df["date"].astype(str))
     return df
 
@@ -247,6 +316,104 @@ def _symbol_kind(symbol: str, name: Optional[str], industry: Optional[str]) -> s
     return "stock"
 
 
+def _is_index_symbol(symbol: Optional[str]) -> bool:
+    lower = (symbol or "").lower()
+    return lower.startswith("sh000") or lower.startswith("sz399")
+
+
+def _normalize_kl_df(df):
+    if df is None or getattr(df, "empty", False):
+        return df
+    df = df.copy()
+    if "date" not in df.columns:
+        df["date"] = df.index
+    df["date"] = df["date"].apply(_date_to_int)
+    df = df[df["date"].notna()]
+    if "open" not in df.columns and "close" in df.columns:
+        df["open"] = df["close"]
+    if "high" not in df.columns and "close" in df.columns:
+        df["high"] = df["close"]
+    if "low" not in df.columns and "close" in df.columns:
+        df["low"] = df["close"]
+    if "pre_close" not in df.columns or df["pre_close"].isna().all():
+        df["pre_close"] = df["close"].shift(1)
+        df.loc[df["pre_close"].isna(), "pre_close"] = df["open"]
+    if "p_change" not in df.columns or df["p_change"].isna().all():
+        base = df["pre_close"].replace(0, float("nan"))
+        df["p_change"] = (df["close"] - df["pre_close"]) / base * 100
+        df["p_change"] = df["p_change"].fillna(0)
+    if "date_week" not in df.columns or df["date_week"].isna().all():
+        df["date_week"] = df["date"].apply(_date_week_from_int)
+    if "key" not in df.columns or df["key"].isna().all():
+        df["key"] = list(range(len(df)))
+    return df
+
+
+def _fetch_akshare_df(symbol: str, start: Optional[str], end: Optional[str], n_folds: int):
+    try:
+        import akshare as ak
+    except Exception:
+        return None
+
+    start_date, end_date = _resolve_date_range(start, end, n_folds)
+    start_str = start_date.strftime("%Y%m%d")
+    end_str = end_date.strftime("%Y%m%d")
+    lower = (symbol or "").lower()
+
+    if _is_index_symbol(lower):
+        df = None
+        if hasattr(ak, "stock_zh_index_daily_em"):
+            try:
+                df = ak.stock_zh_index_daily_em(symbol=lower, start_date=start_str, end_date=end_str)
+            except Exception:
+                df = None
+        if df is None or getattr(df, "empty", False):
+            if hasattr(ak, "index_zh_a_hist"):
+                try:
+                    code = re.sub(r"^(sh|sz)", "", lower)
+                    df = ak.index_zh_a_hist(symbol=code, period="daily", start_date=start_str, end_date=end_str)
+                except Exception:
+                    df = None
+        if df is None or getattr(df, "empty", False):
+            return None
+        rename_map = {
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "涨跌幅": "p_change",
+        }
+        return df.rename(columns=rename_map)
+
+    if not hasattr(ak, "stock_zh_a_hist"):
+        return None
+    try:
+        code = re.sub(r"^(sh|sz)", "", lower)
+        df = ak.stock_zh_a_hist(
+            symbol=code,
+            period="daily",
+            start_date=start_str,
+            end_date=end_str,
+            adjust="",
+        )
+    except Exception:
+        return None
+    if df is None or getattr(df, "empty", False):
+        return None
+    rename_map = {
+        "日期": "date",
+        "开盘": "open",
+        "收盘": "close",
+        "最高": "high",
+        "最低": "low",
+        "成交量": "volume",
+        "涨跌幅": "p_change",
+    }
+    return df.rename(columns=rename_map)
+
+
 def _ensure_symbol_klines(
     db: Session,
     symbol: str,
@@ -262,13 +429,31 @@ def _ensure_symbol_klines(
         return True
     from abupy.MarketBu import ABuSymbolPd
 
-    with _with_market_env(market):
-        df = ABuSymbolPd.make_kl_df(symbol, n_folds=n_folds, start=start, end=end)
+    with _with_pg_data_env(market):
+        df = ABuSymbolPd.make_kl_df(symbol, n_folds=max(1, n_folds), start=start, end=end)
+        if (df is None or getattr(df, "empty", False)) and (start or end):
+            df = ABuSymbolPd.make_kl_df(symbol, n_folds=max(2, n_folds), start=None, end=None)
     if df is None or getattr(df, "empty", False):
         return False
-    rows = _kl_rows_from_df(df, market, symbol)
-    crud.upsert_stock_klines(db, rows)
+    df_rows = _kl_rows_from_df(df, market, symbol)
+    if not df_rows:
+        return False
+    crud.upsert_stock_klines(db, df_rows)
     return True
+
+
+def _ensure_symbols_klines(
+    db: Session,
+    symbols: list[str],
+    start: Optional[str],
+    end: Optional[str],
+    n_folds: int,
+) -> list[str]:
+    missing = []
+    for symbol in symbols:
+        if not _ensure_symbol_klines(db, symbol, start, end, n_folds):
+            missing.append(symbol)
+    return missing
 
 
 @contextmanager
@@ -330,6 +515,7 @@ def _get_pg_market_source():
         def kline(self, n_folds=2, start=None, end=None):
             from abupy.CoreBu import ABuEnv
             from abupy.MarketBu.ABuDataSource import source_dict
+            from abupy.CoreBu.ABuEnv import EMarketSourceType
 
             session = SessionLocal()
             try:
@@ -343,8 +529,27 @@ def _get_pg_market_source():
                     last = rows[-1].trade_date
                     if (not start_date or first <= start_date) and (not end_date or last >= end_date):
                         return _kl_df_from_rows(rows)
-                source_cls = source_dict[ABuEnv.g_market_source.value]
-                df = source_cls(self._symbol).kline(n_folds=n_folds, start=start, end=end)
+                source_order = [
+                    ABuEnv.g_market_source.value,
+                    EMarketSourceType.E_MARKET_SOURCE_tx.value,
+                    EMarketSourceType.E_MARKET_SOURCE_nt.value,
+                    EMarketSourceType.E_MARKET_SOURCE_bd.value,
+                ]
+                seen = set()
+                df = None
+                for source_value in source_order:
+                    if source_value in seen:
+                        continue
+                    seen.add(source_value)
+                    source_cls = source_dict.get(source_value)
+                    if not source_cls:
+                        continue
+                    df = source_cls(self._symbol).kline(n_folds=n_folds, start=start, end=end)
+                    if df is not None and not getattr(df, "empty", False):
+                        break
+                if df is None or getattr(df, "empty", False):
+                    if market in CN_MARKETS or market == "CN":
+                        df = _fetch_akshare_df(symbol_value, start, end, n_folds)
                 if df is None or getattr(df, "empty", False):
                     return df
                 rows = _kl_rows_from_df(df, market, symbol_value)
@@ -581,7 +786,7 @@ def _run_job(job_id: int):
             total_rows = 0
             updated_symbols = 0
             missing_symbols = []
-            with _with_market_env(market):
+            with _with_pg_data_env(market):
                 for symbol in symbols:
                     kl = ABuSymbolPd.make_kl_df(symbol, n_folds=n_folds, start=start, end=end)
                     if kl is None or getattr(kl, "empty", False):
@@ -614,8 +819,28 @@ def _run_job(job_id: int):
             symbols = _normalize_symbols(job.params.get("symbols"), market)
             if not symbols:
                 raise RuntimeError("No symbols specified for backtest.")
+            missing_symbols = _ensure_symbols_klines(
+                db,
+                symbols,
+                job.params.get("start"),
+                job.params.get("end"),
+                job.params.get("n_folds", 1),
+            )
+            available_symbols = [sym for sym in symbols if sym not in missing_symbols]
+            if not available_symbols:
+                raise RuntimeError(
+                    "No kline data available for selected symbols; data source returned empty. "
+                    f"Try kl_update with a wider range (omit start/end), or check data source. Missing: {missing_symbols[:10]}"
+                )
             benchmark_symbol = _resolve_benchmark_symbol(market)
-            _ensure_symbol_klines(db, benchmark_symbol, job.params.get("start"), job.params.get("end"), job.params.get("n_folds", 1))
+            if not _ensure_symbol_klines(
+                db,
+                benchmark_symbol,
+                job.params.get("start"),
+                job.params.get("end"),
+                job.params.get("n_folds", 1),
+            ):
+                benchmark_symbol = available_symbols[0]
             buy_factors = [{"class": AbuFactorBuyBreak, "xd": job.params.get("buy_xd", 42)}]
             sell_factors = [
                 {
@@ -624,7 +849,7 @@ def _run_job(job_id: int):
                     "stop_win_n": job.params.get("stop_win_n", 3.0),
                 }
             ]
-            fallback_symbol = symbols[0] if symbols else None
+            fallback_symbol = benchmark_symbol
             with _with_pg_data_env(market), _with_benchmark_fallback(fallback_symbol):
                 abu_result, _ = abu.run_loop_back(
                     read_cash=job.params.get("cash", 1000000),
@@ -686,8 +911,16 @@ def _run_job(job_id: int):
             end = job.params.get("end")
             if not symbols:
                 raise RuntimeError("No symbols specified for grid search.")
+            missing_symbols = _ensure_symbols_klines(db, symbols, start, end, n_folds)
+            available_symbols = [sym for sym in symbols if sym not in missing_symbols]
+            if not available_symbols:
+                raise RuntimeError(
+                    "No kline data available for selected symbols; data source returned empty. "
+                    f"Try kl_update with a wider range (omit start/end), or check data source. Missing: {missing_symbols[:10]}"
+                )
             benchmark_symbol = _resolve_benchmark_symbol(market)
-            _ensure_symbol_klines(db, benchmark_symbol, start, end, n_folds)
+            if not _ensure_symbol_klines(db, benchmark_symbol, start, end, n_folds):
+                benchmark_symbol = available_symbols[0]
 
             buy_xd_list = job.params.get("buy_xd_list") or [20, 42, 60]
             stop_loss_n_list = job.params.get("stop_loss_n_list") or [0.5, 1.0]
@@ -696,7 +929,7 @@ def _run_job(job_id: int):
             max_runs = max(1, min(max_runs, 200))
 
             runs = []
-            fallback_symbol = symbols[0] if symbols else None
+            fallback_symbol = benchmark_symbol
             with _with_pg_data_env(market), _with_benchmark_fallback(fallback_symbol):
                 for i, (buy_xd, stop_loss_n, stop_win_n) in enumerate(
                     product(buy_xd_list, stop_loss_n_list, stop_win_n_list)
@@ -890,21 +1123,28 @@ def _run_analysis_job(params: dict, db: Session) -> dict:
                 only_last = only_last_raw.strip().lower() in {"true", "1", "yes", "y"}
             else:
                 only_last = bool(only_last_raw)
-            trends = tl.show_support_resistance_trend(only_last=only_last, show=False, show_step=False) or {}
+            trends = tl.show_support_resistance_trend(only_last=only_last, show=False, show_step=False)
+            if trends is None:
+                trends = {}
             trend_lines = []
             x_start = 0
             x_end = len(tl.tl) - 1
             for key, lines in trends.items():
                 for line in lines:
-                    if not line or len(line) < 2:
+                    if line is None:
+                        continue
+                    try:
+                        y_start = float(line[0])
+                        y_end = float(line[1])
+                    except Exception:
                         continue
                     trend_lines.append(
                         {
                             "type": key,
                             "x_start": x_start,
                             "x_end": x_end,
-                            "y_start": float(line[0]),
-                            "y_end": float(line[1]),
+                            "y_start": y_start,
+                            "y_end": y_end,
                         }
                     )
             return {

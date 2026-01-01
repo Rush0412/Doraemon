@@ -378,13 +378,13 @@ def calc_atr(kline_df):
         # 大于21d计算atr21
         kline_df['atr21'] = Atr.atr21(kline_df['high'].values, kline_df['low'].values, kline_df['pre_close'].values)
         # 将前面的bfill
-        kline_df['atr21'].fillna(method='bfill', inplace=True)
+        kline_df['atr21'] = kline_df['atr21'].bfill()
     kline_df['atr14'] = 0
     if kline_df.shape[0] > 14:
         # 大于14d计算atr14
         kline_df['atr14'] = Atr.atr14(kline_df['high'].values, kline_df['low'].values, kline_df['pre_close'].values)
         # 将前面的bfill
-        kline_df['atr14'].fillna(method='bfill', inplace=True)
+        kline_df['atr14'] = kline_df['atr14'].bfill()
 
 
 @AbuDeprecated('only for old abu!')

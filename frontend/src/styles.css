@@ -506,6 +506,19 @@ select:focus {
   margin-bottom: 10px;
 }
 
+.selection-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.selection-load {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
 .selection-chips {
   display: flex;
   flex-wrap: wrap;
