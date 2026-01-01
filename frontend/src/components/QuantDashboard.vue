@@ -314,7 +314,7 @@
             </div>
           </div>
         </div>
-        <div v-if="backtestSummary" class="result-card backtest-visual">
+        <div v-if="showBacktestVisual" class="result-card backtest-visual">
           <h3>回测可视化</h3>
           <div class="result-grid" v-if="backtestTradeStats">
             <div>
@@ -342,11 +342,29 @@
                 {{ symbol }}
               </option>
             </select>
+            <label class="label">订单筛选</label>
+            <select v-model="orderFilter" class="select">
+              <option value="all">全部</option>
+              <option value="win">盈利</option>
+              <option value="loss">亏损</option>
+              <option value="hold">持仓</option>
+            </select>
+            <label class="label">选中订单</label>
+            <select v-model="selectedOrderKey" class="select" @change="syncSelectedOrder">
+              <option value="">未选择</option>
+              <option v-for="order in filteredOrders" :key="orderKey(order)" :value="orderKey(order)">
+                {{ order.symbol }} · {{ formatKlineDate(order.buy_date) }} · {{ formatNumber(order.buy_price) }}
+              </option>
+            </select>
             <label class="label">显示区间</label>
             <input v-model.number="chartWindow.size" type="range" min="60" max="360" step="20" />
             <span class="muted">最近 {{ chartWindow.size }} 根</span>
             <button class="btn-secondary" @click="shiftWindow(1)">更早</button>
             <button class="btn-secondary" @click="shiftWindow(-1)">更晚</button>
+            <label class="toggle">
+              <input type="checkbox" v-model="showStopLines" />
+              <span>止损/止盈线</span>
+            </label>
             <button class="btn-secondary" @click="loadKlineChart" :disabled="klineLoading">
               {{ klineLoading ? '加载中' : '加载K线' }}
             </button>
@@ -354,12 +372,6 @@
           </div>
           <p v-if="klineError" class="error">{{ klineError }}</p>
           <div class="kline-chart" ref="klineContainer">
-            <canvas
-              v-if="klineData.length"
-              ref="klineCanvas"
-              @mousemove="handleKlineHover"
-              @mouseleave="clearKlineHover"
-            ></canvas>
             <div v-if="hoverInfo" class="kline-tooltip">
               <div class="mono">日期 {{ hoverInfo.date }}</div>
               <div class="mono">开 {{ formatNumber(hoverInfo.open) }}</div>
@@ -368,7 +380,49 @@
               <div class="mono">收 {{ formatNumber(hoverInfo.close) }}</div>
               <div class="mono">量 {{ hoverInfo.volume ?? '-' }}</div>
             </div>
-            <p v-else class="muted">暂无K线数据</p>
+            <p v-if="klineLoading" class="muted">K线加载中…</p>
+            <p v-else-if="!klineData.length" class="muted">请点击“加载K线”查看图表</p>
+          </div>
+          <p class="muted">收益曲线（累计盈亏）</p>
+          <div class="equity-chart" ref="equityContainer">
+            <p v-if="!equityData.length" class="muted">暂无收益曲线</p>
+          </div>
+          <div v-if="filteredOrders.length" class="result-card">
+            <h3>交易明细</h3>
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>买入日期</th>
+                    <th>买入价</th>
+                    <th>卖出日期</th>
+                    <th>卖出价</th>
+                    <th>止损价</th>
+                    <th>止盈价</th>
+                    <th>盈亏</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    v-for="order in filteredOrders.slice(0, 80)"
+                    :key="orderKey(order)"
+                    :class="{ 'is-selected': orderKey(order) === selectedOrderKey }"
+                    @click="selectOrder(order)"
+                  >
+                    <td class="mono">{{ order.symbol }}</td>
+                    <td class="mono">{{ formatKlineDate(order.buy_date) }}</td>
+                    <td class="mono">{{ formatNumber(order.buy_price) }}</td>
+                    <td class="mono">{{ formatKlineDate(order.sell_date) }}</td>
+                    <td class="mono">{{ formatNumber(order.sell_price) }}</td>
+                    <td class="mono">{{ formatNumber(order.stop_loss_price) }}</td>
+                    <td class="mono">{{ formatNumber(order.stop_win_price) }}</td>
+                    <td class="mono">{{ formatNumber(resolveOrderProfit(order)) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="muted">默认展示前 80 条交易记录，点击行可定位到K线标记。</p>
           </div>
         </div>
       </div>
@@ -624,6 +678,20 @@
           <div v-if="analysisResult" class="code-wrap">
             <pre class="code">{{ analysisText }}</pre>
           </div>
+          <div v-if="analysisResult" class="info-card">
+            <div class="toolbar">
+              <button class="btn-secondary" @click="syncAnalysisToChart">同步到回测K线</button>
+              <label class="toggle">
+                <input type="checkbox" v-model="analysisOverlayEnabled" />
+                <span>叠加趋势线</span>
+              </label>
+            </div>
+            <p class="muted">分析标的：{{ analysisResult.symbol || '-' }}</p>
+            <p class="muted" v-if="analysisResult.trend_lines?.length">
+              支撑/阻力线：{{ analysisResult.trend_lines.length }} 条
+            </p>
+            <p class="muted">切换到“策略验证”查看图表叠加效果。</p>
+          </div>
           <p v-else class="muted">暂无分析结果。</p>
         </div>
       </div>
@@ -729,6 +797,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { createChart } from 'lightweight-charts'
 import { api } from '../services/api'
 import { useQuantStore } from '../stores/quantStore'
 
@@ -787,11 +856,24 @@ const selectedSymbols = ref([])
 const savedPortfolios = ref([])
 const selectedPortfolio = ref('')
 const klineContainer = ref(null)
-const klineCanvas = ref(null)
+const equityContainer = ref(null)
+const chartRef = ref(null)
+const candleSeries = ref(null)
+const volumeSeries = ref(null)
+const equityChartRef = ref(null)
+const equitySeries = ref(null)
+const analysisLineSeries = ref([])
+const orderPriceLines = ref([])
 const klineData = ref([])
+const equityData = ref([])
 const klineLoading = ref(false)
 const klineError = ref('')
 const chartSymbol = ref('')
+const orderFilter = ref('all')
+const selectedOrderKey = ref('')
+const selectedOrder = ref(null)
+const showStopLines = ref(true)
+const analysisOverlayEnabled = ref(true)
 
 const updateForm = reactive({
   market: market.value,
@@ -899,19 +981,40 @@ const lastUpdateSummary = computed(() => {
   return job?.result || null
 })
 
-const backtestSummary = computed(() => {
-  if (!store.activeJob || store.activeJob.type !== 'backtest') return null
-  return store.activeJob.result?.summary || null
+const latestJobByType = (type) => {
+  if (!type) return null
+  const jobs = store.jobs.filter((job) => job.type === type)
+  if (!jobs.length) return null
+  return jobs.reduce((latest, job) => (job.id > latest.id ? job : latest), jobs[0])
+}
+
+const backtestJob = computed(() => {
+  if (store.activeJob && store.activeJob.type === 'backtest') return store.activeJob
+  return latestJobByType('backtest')
 })
 
-const backtestOrders = computed(() => {
-  if (!store.activeJob || store.activeJob.type !== 'backtest') return []
-  return store.activeJob.result?.orders || []
+const backtestSummary = computed(() => backtestJob.value?.result?.summary || null)
+
+const backtestOrders = computed(() => backtestJob.value?.result?.orders || [])
+
+const filteredOrders = computed(() => {
+  const orders = backtestOrders.value || []
+  const scoped = chartSymbol.value
+    ? orders.filter((item) => String(item.symbol || '').toLowerCase() === chartSymbol.value.toLowerCase())
+    : orders
+  if (orderFilter.value === 'win') return scoped.filter((item) => resolveOrderProfit(item) > 0)
+  if (orderFilter.value === 'loss') return scoped.filter((item) => resolveOrderProfit(item) < 0)
+  if (orderFilter.value === 'hold') {
+    return scoped.filter((item) => {
+      const sellDate = Number(item.sell_date || 0)
+      return !sellDate
+    })
+  }
+  return scoped
 })
 
 const backtestSymbols = computed(() => {
-  if (!store.activeJob || store.activeJob.type !== 'backtest') return []
-  const raw = store.activeJob.result?.summary?.symbols || store.activeJob.params?.symbols
+  const raw = backtestJob.value?.result?.summary?.symbols || backtestJob.value?.params?.symbols
   if (Array.isArray(raw)) return raw
   if (typeof raw === 'string') {
     return raw
@@ -925,7 +1028,7 @@ const backtestSymbols = computed(() => {
 const backtestTradeStats = computed(() => {
   const orders = backtestOrders.value || []
   if (!orders.length) return null
-  const profits = orders.map((item) => Number(item.profit) || 0)
+  const profits = orders.map((item) => resolveOrderProfit(item))
   const total = orders.length
   const wins = profits.filter((p) => p > 0).length
   const totalProfit = profits.reduce((sum, val) => sum + val, 0)
@@ -937,6 +1040,15 @@ const backtestTradeStats = computed(() => {
     totalProfit,
     avgProfit
   }
+})
+
+const showBacktestVisual = computed(() => {
+  return (
+    !!backtestSummary.value ||
+    !!chartSymbol.value ||
+    klineLoading.value ||
+    (klineData.value && klineData.value.length > 0)
+  )
 })
 
 const chartWindow = reactive({
@@ -994,9 +1106,33 @@ watch(chartSymbol, (val, oldVal) => {
 watch(
   () => [chartWindow.size, chartWindow.offset, klineData.value.length],
   () => {
-    if (klineData.value.length) drawKline()
+    if (klineData.value.length) updateChartData()
   }
 )
+
+watch(filteredOrders, () => {
+  syncSelectedOrder()
+  if (klineData.value.length) updateChartData()
+  updateEquityChart()
+})
+
+watch(selectedOrder, () => {
+  applyOrderLines()
+})
+
+watch(showStopLines, () => {
+  applyOrderLines()
+})
+
+watch([analysisResult, analysisOverlayEnabled], () => {
+  if (klineData.value.length) applyAnalysisOverlay()
+})
+
+watch(activeTab, async (val) => {
+  if (val !== 'strategy') return
+  await nextTick()
+  handleResize()
+})
 
 const activeParamsText = computed(() =>
   store.activeJob?.params ? JSON.stringify(store.activeJob.params, null, 2) : ''
@@ -1059,174 +1195,430 @@ const toDateInt = (value) => {
   return Number(`${yyyy}${mm}${dd}`)
 }
 
-const getViewData = () => {
-  const data = klineData.value || []
-  if (!data.length) return []
-  const size = Math.max(40, Math.min(chartWindow.size || 160, data.length))
-  const maxOffset = Math.max(0, data.length - size)
+const formatKlineDate = (value) => {
+  const dateInt = toDateInt(value)
+  if (!dateInt) return '-'
+  const raw = String(dateInt)
+  return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`
+}
+
+const toChartTime = (value) => {
+  const dateInt = toDateInt(value)
+  if (!dateInt) return null
+  const raw = String(dateInt)
+  return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`
+}
+
+const orderKey = (order) => {
+  if (!order) return ''
+  const dateInt = toDateInt(order.buy_date) || 0
+  const price = Number(order.buy_price) || 0
+  return `${order.symbol || 'unknown'}-${dateInt}-${price}`
+}
+
+const focusOrder = (order) => {
+  if (!order || !klineData.value.length) return
+  const dateInt = toDateInt(order.buy_date)
+  if (!dateInt) return
+  const index = klineData.value.findIndex((item) => toDateInt(item.date) === dateInt)
+  if (index < 0) return
+  const total = klineData.value.length
+  const size = Math.max(60, Math.min(chartWindow.size || 160, total))
+  const to = Math.min(total - 1, index + Math.floor(size / 2))
+  chartWindow.offset = Math.max(0, total - 1 - to)
+  applyVisibleRange()
+}
+
+const resolveOrderProfit = (order) => {
+  if (!order) return 0
+  if (order.profit !== undefined && order.profit !== null) {
+    const val = Number(order.profit)
+    if (Number.isFinite(val)) return val
+  }
+  const buy = Number(order.buy_price)
+  const sell = Number(order.sell_price)
+  if (Number.isFinite(buy) && Number.isFinite(sell)) return sell - buy
+  return 0
+}
+
+const syncSelectedOrder = () => {
+  if (!selectedOrderKey.value) {
+    selectedOrder.value = null
+    return
+  }
+  const next = filteredOrders.value.find((order) => orderKey(order) === selectedOrderKey.value)
+  if (!next) {
+    selectedOrderKey.value = ''
+  }
+  selectedOrder.value = next || null
+  if (next) {
+    focusOrder(next)
+  }
+}
+
+const selectOrder = (order) => {
+  if (!order) return
+  selectedOrderKey.value = orderKey(order)
+  selectedOrder.value = order
+  focusOrder(order)
+}
+
+const ensureChart = () => {
+  if (chartRef.value || !klineContainer.value) return
+  const width = klineContainer.value.clientWidth
+  if (!width) return
+  chartRef.value = createChart(klineContainer.value, {
+    height: 340,
+    width,
+    layout: {
+      background: { color: '#ffffff' },
+      textColor: '#1b1a18',
+      fontFamily: "Sora, 'Noto Sans SC', sans-serif"
+    },
+    grid: {
+      vertLines: { color: 'rgba(27, 26, 24, 0.08)' },
+      horzLines: { color: 'rgba(27, 26, 24, 0.08)' }
+    },
+    rightPriceScale: {
+      borderColor: 'rgba(27, 26, 24, 0.2)'
+    },
+    timeScale: {
+      borderColor: 'rgba(27, 26, 24, 0.2)',
+      timeVisible: true,
+      secondsVisible: false
+    },
+    crosshair: {
+      mode: 0
+    }
+  })
+  candleSeries.value = chartRef.value.addCandlestickSeries({
+    upColor: '#1f7a4b',
+    downColor: '#b33a3a',
+    wickUpColor: '#1f7a4b',
+    wickDownColor: '#b33a3a',
+    borderVisible: false
+  })
+  volumeSeries.value = chartRef.value.addHistogramSeries({
+    priceFormat: { type: 'volume' },
+    priceScaleId: '',
+    scaleMargins: { top: 0.8, bottom: 0 }
+  })
+  chartRef.value.subscribeCrosshairMove((param) => {
+    if (!param || !param.time || !candleSeries.value) {
+      hoverInfo.value = null
+      return
+    }
+    const candle = param.seriesData.get(candleSeries.value)
+    if (!candle) {
+      hoverInfo.value = null
+      return
+    }
+    const volume = volumeSeries.value ? param.seriesData.get(volumeSeries.value) : null
+    const time =
+      typeof param.time === 'string'
+        ? param.time
+        : `${param.time.year}-${String(param.time.month).padStart(2, '0')}-${String(param.time.day).padStart(2, '0')}`
+    hoverInfo.value = {
+      date: time,
+      open: candle.open,
+      high: candle.high,
+      low: candle.low,
+      close: candle.close,
+      volume: volume?.value ?? null
+    }
+  })
+}
+
+const ensureEquityChart = () => {
+  if (equityChartRef.value || !equityContainer.value) return
+  const width = equityContainer.value.clientWidth
+  if (!width) return
+  equityChartRef.value = createChart(equityContainer.value, {
+    height: 220,
+    width,
+    layout: {
+      background: { color: '#ffffff' },
+      textColor: '#1b1a18',
+      fontFamily: "Sora, 'Noto Sans SC', sans-serif"
+    },
+    grid: {
+      vertLines: { color: 'rgba(27, 26, 24, 0.08)' },
+      horzLines: { color: 'rgba(27, 26, 24, 0.08)' }
+    },
+    rightPriceScale: {
+      borderColor: 'rgba(27, 26, 24, 0.2)'
+    },
+    timeScale: {
+      borderColor: 'rgba(27, 26, 24, 0.2)',
+      timeVisible: true,
+      secondsVisible: false
+    }
+  })
+  equitySeries.value = equityChartRef.value.addLineSeries({
+    color: '#1f7a4b',
+    lineWidth: 2
+  })
+}
+
+const applyVisibleRange = () => {
+  if (!chartRef.value || !klineData.value.length) return
+  const total = klineData.value.length
+  const size = Math.max(60, Math.min(chartWindow.size || 160, total))
+  const maxOffset = Math.max(0, total - size)
   if (chartWindow.offset > maxOffset) chartWindow.offset = maxOffset
   if (chartWindow.offset < 0) chartWindow.offset = 0
-  const end = data.length - chartWindow.offset
-  const start = Math.max(0, end - size)
-  return data.slice(start, end)
+  const to = total - 1 - chartWindow.offset
+  const from = Math.max(0, to - size + 1)
+  chartRef.value.timeScale().setVisibleLogicalRange({ from, to })
 }
 
-const drawKline = () => {
-  const canvas = klineCanvas.value
-  const container = klineContainer.value
-  const data = getViewData()
-  if (!canvas || !container || !data.length) return
-  const width = Math.max(320, container.clientWidth)
-  const height = 320
-  const ratio = window.devicePixelRatio || 1
-  canvas.width = width * ratio
-  canvas.height = height * ratio
-  canvas.style.width = `${width}px`
-  canvas.style.height = `${height}px`
-
-  const ctx = canvas.getContext('2d')
-  ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
-  ctx.clearRect(0, 0, width, height)
-
-  const padding = 24
-  const plotWidth = width - padding * 2
-  const plotHeight = height - padding * 2
-  const lows = data.map((d) => d.low ?? d.close ?? 0)
-  const highs = data.map((d) => d.high ?? d.close ?? 0)
-  const minLow = Math.min(...lows)
-  const maxHigh = Math.max(...highs)
-  const range = maxHigh - minLow || 1
-  const step = plotWidth / data.length
-  const candleWidth = Math.max(2, step * 0.55)
-
-  const mapY = (value) => padding + ((maxHigh - value) / range) * plotHeight
-
-  ctx.strokeStyle = 'rgba(27, 26, 24, 0.2)'
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  ctx.moveTo(padding, padding)
-  ctx.lineTo(padding, height - padding)
-  ctx.lineTo(width - padding, height - padding)
-  ctx.stroke()
-
-  const indexMap = new Map(data.map((item, idx) => [item.date, idx]))
-
-  data.forEach((item, idx) => {
-    const open = Number(item.open ?? item.close ?? 0)
-    const close = Number(item.close ?? item.open ?? 0)
-    const high = Number(item.high ?? Math.max(open, close))
-    const low = Number(item.low ?? Math.min(open, close))
-    const x = padding + idx * step + step * 0.5
-    const yOpen = mapY(open)
-    const yClose = mapY(close)
-    const yHigh = mapY(high)
-    const yLow = mapY(low)
-    const isUp = close >= open
-    const color = isUp ? '#1f7a4b' : '#b33a3a'
-
-    ctx.strokeStyle = color
-    ctx.beginPath()
-    ctx.moveTo(x, yHigh)
-    ctx.lineTo(x, yLow)
-    ctx.stroke()
-
-    const bodyTop = Math.min(yOpen, yClose)
-    const bodyHeight = Math.max(2, Math.abs(yClose - yOpen))
-    ctx.fillStyle = color
-    ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight)
-  })
-
-  const orders = backtestOrders.value || []
+const buildMarkers = () => {
+  const orders = (filteredOrders.value || []).slice(0, 200)
+  const markers = []
   orders.forEach((order) => {
-    const buyDate = toDateInt(order.buy_date)
-    const sellDate = toDateInt(order.sell_date)
-    if (buyDate && indexMap.has(buyDate)) {
-      const idx = indexMap.get(buyDate)
-      const price = Number(order.buy_price ?? data[idx]?.close ?? 0)
-      const x = padding + idx * step + step * 0.5
-      const y = mapY(price) - 8
-      ctx.fillStyle = '#0f1b2e'
-      ctx.beginPath()
-      ctx.moveTo(x, y)
-      ctx.lineTo(x - 6, y - 10)
-      ctx.lineTo(x + 6, y - 10)
-      ctx.closePath()
-      ctx.fill()
+    const buyTime = toChartTime(order.buy_date)
+    const sellTime = toChartTime(order.sell_date)
+    if (buyTime) {
+      markers.push({
+        time: buyTime,
+        position: 'belowBar',
+        color: '#1f7a4b',
+        shape: 'arrowUp',
+        text: `买 ${formatNumber(order.buy_price)}`
+      })
     }
-    if (sellDate && indexMap.has(sellDate)) {
-      const idx = indexMap.get(sellDate)
-      const price = Number(order.sell_price ?? data[idx]?.close ?? 0)
-      const x = padding + idx * step + step * 0.5
-      const y = mapY(price) + 8
-      ctx.fillStyle = '#c17f2f'
-      ctx.beginPath()
-      ctx.moveTo(x, y)
-      ctx.lineTo(x - 6, y + 10)
-      ctx.lineTo(x + 6, y + 10)
-      ctx.closePath()
-      ctx.fill()
+    if (sellTime && Number(order.sell_date) > 0) {
+      markers.push({
+        time: sellTime,
+        position: 'aboveBar',
+        color: '#c17f2f',
+        shape: 'arrowDown',
+        text: `卖 ${formatNumber(order.sell_price)}`
+      })
     }
   })
+  return markers.sort((a, b) => String(a.time).localeCompare(String(b.time)))
+}
 
-  if (hoverInfo.value) {
-    const idx = hoverInfo.value.index
-    const hoverItem = data[idx]
-    if (hoverItem) {
-      const x = padding + idx * step + step * 0.5
-      const y = mapY(Number(hoverItem.close ?? hoverItem.open ?? 0))
-      ctx.strokeStyle = 'rgba(27, 26, 24, 0.25)'
-      ctx.lineWidth = 1
-      ctx.beginPath()
-      ctx.moveTo(x, padding)
-      ctx.lineTo(x, height - padding)
-      ctx.stroke()
-      ctx.beginPath()
-      ctx.moveTo(padding, y)
-      ctx.lineTo(width - padding, y)
-      ctx.stroke()
+const clearOrderLines = () => {
+  if (!candleSeries.value || !orderPriceLines.value.length) {
+    orderPriceLines.value = []
+    return
+  }
+  orderPriceLines.value.forEach((line) => {
+    try {
+      candleSeries.value.removePriceLine(line)
+    } catch {
+      // ignore stale lines
+    }
+  })
+  orderPriceLines.value = []
+}
+
+const applyOrderLines = () => {
+  clearOrderLines()
+  if (!candleSeries.value || !selectedOrder.value) return
+  const order = selectedOrder.value
+  const lines = []
+  const buyPrice = Number(order.buy_price)
+  if (Number.isFinite(buyPrice) && buyPrice > 0) {
+    lines.push(
+      candleSeries.value.createPriceLine({
+        price: buyPrice,
+        color: '#1f7a4b',
+        lineWidth: 2,
+        lineStyle: 0,
+        axisLabelVisible: true,
+        title: '买入'
+      })
+    )
+  }
+  const sellPrice = Number(order.sell_price)
+  const sellDate = Number(order.sell_date || 0)
+  if (Number.isFinite(sellPrice) && sellPrice > 0 && sellDate > 0) {
+    lines.push(
+      candleSeries.value.createPriceLine({
+        price: sellPrice,
+        color: '#c17f2f',
+        lineWidth: 2,
+        lineStyle: 0,
+        axisLabelVisible: true,
+        title: '卖出'
+      })
+    )
+  }
+  if (showStopLines.value) {
+    const stopLoss = Number(order.stop_loss_price)
+    if (Number.isFinite(stopLoss) && stopLoss > 0) {
+      lines.push(
+        candleSeries.value.createPriceLine({
+          price: stopLoss,
+          color: '#b33a3a',
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: '止损'
+        })
+      )
+    }
+    const stopWin = Number(order.stop_win_price)
+    if (Number.isFinite(stopWin) && stopWin > 0) {
+      lines.push(
+        candleSeries.value.createPriceLine({
+          price: stopWin,
+          color: '#1f7a4b',
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: '止盈'
+        })
+      )
     }
   }
+  orderPriceLines.value = lines
 }
 
-const handleKlineHover = (event) => {
-  const canvas = klineCanvas.value
-  const container = klineContainer.value
-  const data = getViewData()
-  if (!canvas || !container || !data.length) return
-  const rect = canvas.getBoundingClientRect()
-  const x = event.clientX - rect.left
-  const padding = 24
-  const plotWidth = Math.max(10, rect.width - padding * 2)
-  const step = plotWidth / data.length
-  const idx = Math.min(data.length - 1, Math.max(0, Math.floor((x - padding) / step)))
-  const item = data[idx]
-  if (!item) return
-  hoverInfo.value = {
-    index: idx,
-    date: item.date,
-    open: item.open,
-    close: item.close,
-    high: item.high,
-    low: item.low,
-    volume: item.volume
+const clearAnalysisOverlay = () => {
+  if (!chartRef.value || !analysisLineSeries.value.length) {
+    analysisLineSeries.value = []
+    return
   }
-  drawKline()
+  analysisLineSeries.value.forEach((series) => {
+    try {
+      chartRef.value.removeSeries(series)
+    } catch {
+      // ignore stale series
+    }
+  })
+  analysisLineSeries.value = []
 }
 
-const clearKlineHover = () => {
-  hoverInfo.value = null
-  drawKline()
+const applyAnalysisOverlay = () => {
+  clearAnalysisOverlay()
+  if (!analysisOverlayEnabled.value || !analysisResult.value || !chartRef.value) return
+  const lines = analysisResult.value.trend_lines
+  if (!Array.isArray(lines) || !lines.length || !klineData.value.length) return
+  const symbol = (analysisResult.value.symbol || '').toLowerCase()
+  if (symbol && chartSymbol.value && symbol !== chartSymbol.value.toLowerCase()) return
+  lines.forEach((line) => {
+    const startIdx = Math.max(0, Math.min(klineData.value.length - 1, Math.round(Number(line.x_start) || 0)))
+    const endIdx = Math.max(0, Math.min(klineData.value.length - 1, Math.round(Number(line.x_end) || 0)))
+    const startTime = toChartTime(klineData.value[startIdx]?.date)
+    const endTime = toChartTime(klineData.value[endIdx]?.date)
+    if (!startTime || !endTime) return
+    const color = line.type === 'support' ? '#2f6fdd' : '#c17f2f'
+    const series = chartRef.value.addLineSeries({
+      color,
+      lineWidth: 1,
+      lineStyle: 2
+    })
+    series.setData([
+      { time: startTime, value: Number(line.y_start) || 0 },
+      { time: endTime, value: Number(line.y_end) || 0 }
+    ])
+    analysisLineSeries.value.push(series)
+  })
+}
+
+const syncAnalysisToChart = async () => {
+  if (!analysisResult.value) return
+  if (analysisResult.value.symbol) {
+    chartSymbol.value = analysisResult.value.symbol
+    if (!backtestForm.symbols) {
+      backtestForm.symbols = analysisResult.value.symbol
+    }
+  }
+  backtestForm.market = toolForm.market
+  if (toolForm.start) backtestForm.start = toolForm.start
+  if (toolForm.end) backtestForm.end = toolForm.end
+  analysisOverlayEnabled.value = true
+  activeTab.value = 'strategy'
+  await nextTick()
+  await loadKlineChart()
+}
+
+const updateChartData = () => {
+  ensureChart()
+  if (!chartRef.value || !candleSeries.value || !volumeSeries.value) return
+  const data = (klineData.value || []).slice().sort((a, b) => {
+    const left = toDateInt(a.date) || 0
+    const right = toDateInt(b.date) || 0
+    return left - right
+  })
+  if (!data.length) {
+    candleSeries.value.setData([])
+    volumeSeries.value.setData([])
+    hoverInfo.value = null
+    clearOrderLines()
+    clearAnalysisOverlay()
+    return
+  }
+  const candleData = data
+    .map((item) => ({
+      time: toChartTime(item.date),
+      open: Number(item.open ?? item.close ?? 0),
+      high: Number(item.high ?? item.close ?? 0),
+      low: Number(item.low ?? item.close ?? 0),
+      close: Number(item.close ?? item.open ?? 0)
+    }))
+    .filter((item) => item.time)
+  candleSeries.value.setData(candleData)
+  volumeSeries.value.setData(
+    data
+      .map((item) => ({
+        time: toChartTime(item.date),
+        value: Number(item.volume ?? 0),
+        color:
+          Number(item.close ?? 0) >= Number(item.open ?? 0)
+            ? 'rgba(31, 122, 75, 0.4)'
+            : 'rgba(179, 58, 58, 0.4)'
+      }))
+      .filter((item) => item.time)
+  )
+  candleSeries.value.setMarkers(buildMarkers())
+  applyVisibleRange()
+  applyOrderLines()
+  applyAnalysisOverlay()
+}
+
+const buildEquitySeries = () => {
+  const orders = filteredOrders.value || []
+  const rows = orders
+    .map((order) => {
+      const time = toChartTime(order.sell_date || order.buy_date)
+      return {
+        time,
+        profit: resolveOrderProfit(order)
+      }
+    })
+    .filter((row) => row.time)
+    .sort((a, b) => String(a.time).localeCompare(String(b.time)))
+  let cumulative = 0
+  return rows.map((row) => {
+    cumulative += row.profit
+    return { time: row.time, value: Number(cumulative.toFixed(2)) }
+  })
+}
+
+const updateEquityChart = () => {
+  const points = buildEquitySeries()
+  equityData.value = points
+  ensureEquityChart()
+  if (!equityChartRef.value || !equitySeries.value) return
+  equitySeries.value.setData(points)
+  if (points.length) {
+    equityChartRef.value.timeScale().fitContent()
+  }
 }
 
 const shiftWindow = (direction) => {
   const data = klineData.value || []
   if (!data.length) return
-  const step = Math.max(10, Math.floor(chartWindow.size / 5))
-  const size = Math.max(40, Math.min(chartWindow.size || 160, data.length))
+  const step = Math.max(10, Math.floor((chartWindow.size || 160) / 5))
+  const size = Math.max(60, Math.min(chartWindow.size || 160, data.length))
   const maxOffset = Math.max(0, data.length - size)
-  const next = Math.min(maxOffset, Math.max(0, chartWindow.offset + direction * step))
-  chartWindow.offset = next
-  drawKline()
+  chartWindow.offset = Math.min(maxOffset, Math.max(0, chartWindow.offset + direction * step))
+  applyVisibleRange()
 }
 
 const loadKlineChart = async () => {
@@ -1244,15 +1636,20 @@ const loadKlineChart = async () => {
         market: backtestForm.market,
         start: backtestForm.start || undefined,
         end: backtestForm.end || undefined,
-        limit: 400
+        limit: 600
       }
     })
-    klineData.value = data.data?.items || []
+    const items = data.data?.items || []
+    klineData.value = items.slice().sort((a, b) => {
+      const left = toDateInt(a.date) || 0
+      const right = toDateInt(b.date) || 0
+      return left - right
+    })
     chartWindow.offset = 0
     await nextTick()
-    drawKline()
+    updateChartData()
   } catch (err) {
-    klineError.value = err.message
+    klineError.value = err?.message || String(err)
   } finally {
     klineLoading.value = false
   }
@@ -1548,7 +1945,14 @@ const runTool = async () => {
 }
 
 const handleResize = () => {
-  if (klineData.value.length) drawKline()
+  if (chartRef.value && klineContainer.value) {
+    chartRef.value.applyOptions({ width: klineContainer.value.clientWidth })
+  }
+  if (equityChartRef.value && equityContainer.value) {
+    equityChartRef.value.applyOptions({ width: equityContainer.value.clientWidth })
+  }
+  if (klineData.value.length) updateChartData()
+  if (equityData.value.length) updateEquityChart()
 }
 
 onMounted(async () => {
@@ -1568,5 +1972,13 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
+  if (chartRef.value) {
+    chartRef.value.remove()
+    chartRef.value = null
+  }
+  if (equityChartRef.value) {
+    equityChartRef.value.remove()
+    equityChartRef.value = null
+  }
 })
 </script>

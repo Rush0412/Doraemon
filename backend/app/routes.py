@@ -930,6 +930,54 @@ def _run_job(job_id: int):
             try:
                 orders_pd = getattr(abu_result, "orders_pd", None)
                 if orders_pd is not None and hasattr(orders_pd, "head") and hasattr(orders_pd, "to_json"):
+                    import pandas as pd
+
+                    orders_pd = orders_pd.copy()
+                    orders_pd["buy_date_int"] = pd.to_numeric(orders_pd.get("buy_date"), errors="coerce").fillna(0).astype(int)
+                    orders_pd["sell_date_int"] = pd.to_numeric(orders_pd.get("sell_date"), errors="coerce").fillna(0).astype(int)
+                    stop_loss_n = float(job.params.get("stop_loss_n", 0.5))
+                    stop_win_n = float(job.params.get("stop_win_n", 3.0))
+                    symbols_orders = orders_pd["symbol"].dropna().unique().tolist() if "symbol" in orders_pd else []
+                    for sym in symbols_orders:
+                        sym_orders = orders_pd[orders_pd["symbol"] == sym]
+                        if sym_orders.empty:
+                            continue
+                        min_date = int(sym_orders["buy_date_int"].min())
+                        max_date = int(sym_orders["buy_date_int"].max())
+                        if min_date <= 0 or max_date <= 0:
+                            continue
+                        start_date = datetime.strptime(str(min_date), "%Y%m%d").date()
+                        end_date = datetime.strptime(str(max_date), "%Y%m%d").date()
+                        rows = crud.load_klines(db, _market_from_symbol(sym), sym, start=start_date, end=end_date)
+                        atr_map = {
+                            int(row.trade_date.strftime("%Y%m%d")): (row.atr14, row.atr21)
+                            for row in rows
+                        }
+                        for idx in sym_orders.index:
+                            buy_date = int(orders_pd.at[idx, "buy_date_int"] or 0)
+                            if buy_date <= 0:
+                                continue
+                            atr14, atr21 = atr_map.get(buy_date, (None, None))
+                            if atr14 is None and atr21 is None:
+                                continue
+                            atr_base = 0.0
+                            if atr14 is not None:
+                                atr_base += float(atr14)
+                            if atr21 is not None:
+                                atr_base += float(atr21)
+                            if atr_base <= 0:
+                                continue
+                            buy_price = float(orders_pd.at[idx, "buy_price"] or 0)
+                            expect_direction = orders_pd.at[idx, "expect_direction"] or 1
+                            direction = 1 if float(expect_direction) >= 0 else -1
+                            if direction >= 0:
+                                orders_pd.at[idx, "stop_loss_price"] = buy_price - stop_loss_n * atr_base
+                                orders_pd.at[idx, "stop_win_price"] = buy_price + stop_win_n * atr_base
+                            else:
+                                orders_pd.at[idx, "stop_loss_price"] = buy_price + stop_loss_n * atr_base
+                                orders_pd.at[idx, "stop_win_price"] = buy_price - stop_win_n * atr_base
+                            orders_pd.at[idx, "atr_base"] = atr_base
+
                     orders_json = orders_pd.head(200).to_json(orient="records", date_format="iso")
                     orders_preview = json.loads(orders_json)
             except Exception:

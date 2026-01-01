@@ -567,9 +567,17 @@ select:focus {
   border: 1px solid var(--color-border);
   background: #fff;
   padding: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  position: relative;
+}
+
+.equity-chart {
+  margin-top: 12px;
+  width: 100%;
+  min-height: 200px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: #fff;
+  padding: 8px;
   position: relative;
 }
 
@@ -591,6 +599,22 @@ select:focus {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--color-muted);
+}
+
+.toggle input {
+  accent-color: var(--color-gold);
+}
+
+.table tr.is-selected {
+  background: #f6efe2;
 }
 
 .pager {
