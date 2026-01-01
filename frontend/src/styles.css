@@ -1,12 +1,12 @@
-@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Sora:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Noto+Sans+SC:wght@300;400;500;600&family=Noto+Serif+SC:wght@600;700&family=Sora:wght@300;400;500;600&display=swap');
 
 :root {
-  font-family: 'Sora', 'Segoe UI', sans-serif;
+  font-family: 'Sora', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   color-scheme: light;
   background-color: #f4f1ec;
   color: #1b1a18;
 
-  --font-display: 'Cormorant Garamond', serif;
+  --font-display: 'Cormorant Garamond', 'Noto Serif SC', serif;
 
   --color-bg: #f4f1ec;
   --color-surface: #ffffff;
@@ -197,6 +197,83 @@ button {
   z-index: 1;
 }
 
+.flow-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.flow-track {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.flow-step {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: rgba(255, 255, 255, 0.9);
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.flow-step:hover {
+  transform: translateY(-1px);
+  border-color: rgba(196, 160, 90, 0.5);
+}
+
+.flow-step.active {
+  border-color: rgba(196, 160, 90, 0.9);
+  background: rgba(255, 250, 240, 0.96);
+  box-shadow: var(--shadow-soft);
+}
+
+.flow-step-index {
+  font-family: var(--font-display);
+  font-size: 18px;
+  color: var(--color-gold-dark);
+}
+
+.flow-step-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.flow-step-sub {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--color-muted);
+}
+
+.flow-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px;
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(226, 219, 210, 0.7);
+  box-shadow: var(--shadow-soft);
+}
+
+.flow-context h2 {
+  margin: 6px 0 0;
+  font-family: var(--font-display);
+  font-size: 22px;
+}
+
+.flow-actions {
+  display: flex;
+  gap: 10px;
+}
+
 .metric-card {
   background: rgba(255, 255, 255, 0.08);
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -253,6 +330,12 @@ button {
   margin: 0;
   font-family: var(--font-display);
   font-size: 22px;
+}
+
+.panel-note {
+  margin: 12px 0 0;
+  font-size: 13px;
+  color: var(--color-muted);
 }
 
 .form-grid {
@@ -458,10 +541,50 @@ select:focus {
   background: #fbfaf7;
 }
 
+.info-card {
+  margin-top: 16px;
+  padding: 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: #f9f6f2;
+}
+
 .result-grid {
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+}
+
+.backtest-visual .toolbar {
+  align-items: flex-end;
+}
+
+.kline-chart {
+  margin-top: 12px;
+  width: 100%;
+  min-height: 320px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: #fff;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.kline-tooltip {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: rgba(16, 16, 16, 0.92);
+  color: #f6f2ea;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  display: grid;
+  gap: 4px;
+  min-width: 120px;
 }
 
 .table-actions {
@@ -585,5 +708,14 @@ select:focus {
   .nav {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .flow-context {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .flow-actions {
+    width: 100%;
   }
 }

@@ -578,6 +578,21 @@ def _with_pg_data_env(market: str):
         ABuEnv.g_data_fetch_mode = prev_mode
 
 
+@contextmanager
+def _suppress_numeric_warnings():
+    import warnings
+    import numpy as np
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning, module=r"numpy\\.polynomial")
+        warnings.filterwarnings("ignore", category=RuntimeWarning, module=r"scipy\\.optimize")
+        prev = np.seterr(over="ignore", invalid="ignore")
+        try:
+            yield
+        finally:
+            np.seterr(**prev)
+
+
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -751,6 +766,45 @@ def get_symbol(symbol: str, market: str = "CN", db: Session = Depends(get_db)):
             industry=item.industry,
             kind=_symbol_kind(item.symbol, item.name, item.industry),
         )
+    )
+
+
+@quant_router.get("/klines", response_model=schemas.APIResponse)
+def get_klines(
+    symbol: str,
+    market: str = "CN",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 400,
+    db: Session = Depends(get_db),
+):
+    if not symbol:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Symbol is required")
+    market = (market or "CN").upper()
+    normalized = _normalize_symbol(symbol, market) or symbol
+    if market in CN_MARKETS or market == "CN":
+        _ensure_symbol_klines(db, normalized, start, end, 1)
+    target_market = _market_from_symbol(normalized)
+    rows = crud.load_klines(db, target_market, normalized, start=_parse_date_str(start), end=_parse_date_str(end))
+    if limit and len(rows) > limit:
+        rows = rows[-limit:]
+    items = [
+        {
+            "date": int(row.trade_date.strftime("%Y%m%d")),
+            "open": row.open,
+            "close": row.close,
+            "high": row.high,
+            "low": row.low,
+            "volume": row.volume,
+        }
+        for row in rows
+    ]
+    return schemas.APIResponse(
+        data={
+            "symbol": normalized,
+            "market": target_market,
+            "items": items,
+        }
     )
 
 
@@ -1111,7 +1165,7 @@ def _run_analysis_job(params: dict, db: Session) -> dict:
         step = max(1, int(len(series) / max_points))
         return series[::step]
 
-    with _with_market_env(market):
+    with _suppress_numeric_warnings(), _with_market_env(market):
         if tool in {"support_resistance", "support", "resistance"}:
             symbol = symbols[0]
             kl = _fetch_kl(symbol)
@@ -1350,48 +1404,48 @@ def _run_analysis_job(params: dict, db: Session) -> dict:
 def start_kl_update(payload: dict, db: Session = Depends(get_db)):
     job = crud.create_quant_job(db, schemas.QuantJobCreate(type="kl_update", params=payload))
     executor.submit(_run_job, job.id)
-    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.from_orm(job))
+    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.model_validate(job))
 
 
 @quant_router.post("/backtest", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
 def start_backtest(payload: dict, db: Session = Depends(get_db)):
     job = crud.create_quant_job(db, schemas.QuantJobCreate(type="backtest", params=payload))
     executor.submit(_run_job, job.id)
-    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.from_orm(job))
+    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.model_validate(job))
 
 
 @quant_router.post("/grid-search", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
 def start_grid_search(payload: dict, db: Session = Depends(get_db)):
     job = crud.create_quant_job(db, schemas.QuantJobCreate(type="grid_search", params=payload))
     executor.submit(_run_job, job.id)
-    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.from_orm(job))
+    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.model_validate(job))
 
 
 @quant_router.post("/tools", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
 def start_quant_tools(payload: dict, db: Session = Depends(get_db)):
     job = crud.create_quant_job(db, schemas.QuantJobCreate(type="analysis", params=payload))
     executor.submit(_run_job, job.id)
-    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.from_orm(job))
+    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.model_validate(job))
 
 
 @quant_router.get("/verify", response_model=schemas.APIResponse)
 def verify_quant_env(db: Session = Depends(get_db)):
     job = crud.create_quant_job(db, schemas.QuantJobCreate(type="verify", params={}))
     executor.submit(_run_job, job.id)
-    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.from_orm(job))
+    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.model_validate(job))
 
 
 @jobs_router.get("/", response_model=schemas.APIResponse)
 def list_jobs(limit: int = 50, db: Session = Depends(get_db)):
     jobs = crud.list_quant_jobs(db, limit=limit)
-    return schemas.APIResponse(data=[schemas.QuantJobRead.from_orm(job) for job in jobs])
+    return schemas.APIResponse(data=[schemas.QuantJobRead.model_validate(job) for job in jobs])
 
 
 @jobs_router.post("/", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
 def create_job(payload: schemas.QuantJobCreate, db: Session = Depends(get_db)):
     job = crud.create_quant_job(db, payload)
     executor.submit(_run_job, job.id)
-    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.from_orm(job))
+    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.model_validate(job))
 
 
 @jobs_router.get("/{job_id}", response_model=schemas.APIResponse)
@@ -1399,7 +1453,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)):
     job = crud.get_quant_job(db, job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    return schemas.APIResponse(data=schemas.QuantJobRead.from_orm(job))
+    return schemas.APIResponse(data=schemas.QuantJobRead.model_validate(job))
 
 
 @jobs_router.delete("/{job_id}", response_model=schemas.APIResponse)

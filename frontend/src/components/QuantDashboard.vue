@@ -34,7 +34,33 @@
       </div>
     </section>
 
-    <section class="grid grid-2">
+    <section class="flow-nav">
+      <div class="flow-track">
+        <button
+          v-for="tab in tabs"
+          :key="tab.id"
+          :class="['flow-step', { active: activeTab === tab.id }]"
+          @click="setTab(tab.id)"
+        >
+          <span class="flow-step-index">{{ tab.step }}</span>
+          <span class="flow-step-title">{{ tab.title }}</span>
+          <span class="flow-step-sub">{{ tab.subtitle }}</span>
+        </button>
+      </div>
+      <div class="flow-context">
+        <div>
+          <p class="eyebrow">当前步骤</p>
+          <h2>{{ activeTabMeta.title }}</h2>
+          <p class="muted">{{ activeTabMeta.hint }}</p>
+        </div>
+        <div class="flow-actions">
+          <button class="btn-secondary" @click="goPrev" :disabled="isFirstTab">上一步</button>
+          <button class="btn-primary" @click="goNext" :disabled="isLastTab">下一步</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid grid-2" v-show="activeTab === 'prepare'">
       <div class="panel glass">
         <header class="panel-title">
           <div>
@@ -43,6 +69,7 @@
           </div>
           <span class="pill">Symbols</span>
         </header>
+        <p class="panel-note">建议先导入股票库，再检索并加入选股篮。选股篮会同步到更新、回测、寻优与分析。</p>
         <div class="form-grid">
           <div>
             <label class="label">市场</label>
@@ -161,6 +188,7 @@
           </div>
           <span class="pill">Update</span>
         </header>
+        <p class="panel-note">更新会将K线写入PG；建议回溯至少 1 年。选股篮为空时将全量更新当前市场。</p>
         <div class="form-grid">
           <div>
             <label class="label">回溯年数</label>
@@ -201,10 +229,27 @@
           </div>
           <p v-else class="muted">全量更新当前市场</p>
         </div>
+        <div v-if="lastUpdateSummary" class="info-card">
+          <p class="muted">最近更新</p>
+          <div class="result-grid">
+            <div>
+              <p class="muted">更新标的</p>
+              <p class="metric-value">{{ lastUpdateSummary.updated_symbols || 0 }}</p>
+            </div>
+            <div>
+              <p class="muted">写入行数</p>
+              <p class="metric-value">{{ lastUpdateSummary.rows || 0 }}</p>
+            </div>
+            <div>
+              <p class="muted">缺失标的</p>
+              <p class="metric-value">{{ (lastUpdateSummary.missing_symbols || []).length }}</p>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
-    <section class="grid grid-2">
+    <section class="grid grid-2" v-show="activeTab === 'strategy'">
       <div class="panel">
         <header class="panel-title">
           <div>
@@ -213,6 +258,7 @@
           </div>
           <span class="pill">Backtest</span>
         </header>
+        <p class="panel-note">建议回测区间 ≥ 1 年；若无成交请缩短买入周期或扩大回测时间。</p>
         <div class="form-grid">
           <div>
             <label class="label">标的列表</label>
@@ -268,6 +314,63 @@
             </div>
           </div>
         </div>
+        <div v-if="backtestSummary" class="result-card backtest-visual">
+          <h3>回测可视化</h3>
+          <div class="result-grid" v-if="backtestTradeStats">
+            <div>
+              <p class="muted">交易次数</p>
+              <p class="metric-value">{{ backtestTradeStats.total }}</p>
+            </div>
+            <div>
+              <p class="muted">胜率</p>
+              <p class="metric-value">{{ formatNumber(backtestTradeStats.winRate, 1) }}%</p>
+            </div>
+            <div>
+              <p class="muted">总盈利</p>
+              <p class="metric-value">{{ formatNumber(backtestTradeStats.totalProfit, 2) }}</p>
+            </div>
+            <div>
+              <p class="muted">单笔均值</p>
+              <p class="metric-value">{{ formatNumber(backtestTradeStats.avgProfit, 2) }}</p>
+            </div>
+          </div>
+          <p v-else class="muted">暂无交易明细，建议扩大回测区间或调整买入周期。</p>
+          <div class="toolbar">
+            <label class="label">展示标的</label>
+            <select v-model="chartSymbol" class="select">
+              <option v-for="symbol in backtestSymbols" :key="symbol" :value="symbol">
+                {{ symbol }}
+              </option>
+            </select>
+            <label class="label">显示区间</label>
+            <input v-model.number="chartWindow.size" type="range" min="60" max="360" step="20" />
+            <span class="muted">最近 {{ chartWindow.size }} 根</span>
+            <button class="btn-secondary" @click="shiftWindow(1)">更早</button>
+            <button class="btn-secondary" @click="shiftWindow(-1)">更晚</button>
+            <button class="btn-secondary" @click="loadKlineChart" :disabled="klineLoading">
+              {{ klineLoading ? '加载中' : '加载K线' }}
+            </button>
+            <span class="muted">上三角为买入，下三角为卖出</span>
+          </div>
+          <p v-if="klineError" class="error">{{ klineError }}</p>
+          <div class="kline-chart" ref="klineContainer">
+            <canvas
+              v-if="klineData.length"
+              ref="klineCanvas"
+              @mousemove="handleKlineHover"
+              @mouseleave="clearKlineHover"
+            ></canvas>
+            <div v-if="hoverInfo" class="kline-tooltip">
+              <div class="mono">日期 {{ hoverInfo.date }}</div>
+              <div class="mono">开 {{ formatNumber(hoverInfo.open) }}</div>
+              <div class="mono">高 {{ formatNumber(hoverInfo.high) }}</div>
+              <div class="mono">低 {{ formatNumber(hoverInfo.low) }}</div>
+              <div class="mono">收 {{ formatNumber(hoverInfo.close) }}</div>
+              <div class="mono">量 {{ hoverInfo.volume ?? '-' }}</div>
+            </div>
+            <p v-else class="muted">暂无K线数据</p>
+          </div>
+        </div>
       </div>
 
       <div class="panel">
@@ -278,6 +381,7 @@
           </div>
           <span class="pill">Grid</span>
         </header>
+        <p class="panel-note">结果里的最佳参数可一键回填到回测；寻优范围越大运行越久。</p>
         <div class="form-grid">
           <div>
             <label class="label">标的列表</label>
@@ -322,12 +426,16 @@
         </div>
         <div v-if="gridSummary" class="result-card">
           <h3>最佳组合</h3>
+          <div class="toolbar">
+            <button class="btn-secondary" @click="applyGridToBacktest">应用到回测参数</button>
+            <span class="muted">自动填充买入周期/止损/止盈</span>
+          </div>
           <pre class="code">{{ gridSummaryText }}</pre>
         </div>
       </div>
     </section>
 
-    <section class="panel">
+    <section class="panel" v-show="activeTab === 'tools'">
       <header class="panel-title">
         <div>
           <h2>量化分析工具</h2>
@@ -335,6 +443,7 @@
         </div>
         <span class="pill">Tools</span>
       </header>
+      <p class="panel-note">工具结果用于解释回测结论：趋势线判断支撑/阻力，相关性用于组合分散，跳空用于风险提示。</p>
       <div class="tool-layout">
         <div class="tool-form">
           <div class="form-grid">
@@ -520,7 +629,7 @@
       </div>
     </section>
 
-    <section class="panel">
+    <section class="panel" v-show="activeTab === 'jobs'">
       <header class="panel-title">
         <div>
           <h2>任务队列</h2>
@@ -531,6 +640,7 @@
           <span :class="['status', `status-${store.activeJob.status}`]">{{ store.activeJob.status }}</span>
         </div>
       </header>
+      <p class="panel-note">成功任务可导出 JSON/CSV，用于后续复盘或策略记录。</p>
 
       <p v-if="store.jobsError" class="error">{{ store.jobsError }}</p>
       <div v-if="store.jobsLoading" class="muted">加载中…</div>
@@ -618,10 +728,57 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { api } from '../services/api'
 import { useQuantStore } from '../stores/quantStore'
 
 const store = useQuantStore()
+const tabs = [
+  {
+    id: 'prepare',
+    step: '01',
+    title: '数据准备',
+    subtitle: '检索 → 更新',
+    hint: '先检索并建立选股篮，再更新 K 线到 PG 数据库。'
+  },
+  {
+    id: 'strategy',
+    step: '02',
+    title: '策略验证',
+    subtitle: '回测 → 寻优',
+    hint: '先回测验证，再用网格寻优确定参数并回填。'
+  },
+  {
+    id: 'tools',
+    step: '03',
+    title: '量化分析',
+    subtitle: '解释与对比',
+    hint: '用趋势线、相关性与统计指标解释策略表现。'
+  },
+  {
+    id: 'jobs',
+    step: '04',
+    title: '任务记录',
+    subtitle: '导出与复盘',
+    hint: '查看执行过程、导出结果并沉淀结论。'
+  }
+]
+const activeTab = ref('prepare')
+const activeTabMeta = computed(() => tabs.find((tab) => tab.id === activeTab.value) || tabs[0])
+const tabIndex = computed(() => tabs.findIndex((tab) => tab.id === activeTab.value))
+const isFirstTab = computed(() => tabIndex.value <= 0)
+const isLastTab = computed(() => tabIndex.value >= tabs.length - 1)
+const setTab = (id) => {
+  activeTab.value = id
+}
+const goPrev = () => {
+  if (isFirstTab.value) return
+  activeTab.value = tabs[tabIndex.value - 1].id
+}
+const goNext = () => {
+  if (isLastTab.value) return
+  activeTab.value = tabs[tabIndex.value + 1].id
+}
 const market = ref(store.market)
 const query = ref(store.query)
 const kind = ref(store.kind)
@@ -629,6 +786,12 @@ const pageSize = ref(store.pageSize)
 const selectedSymbols = ref([])
 const savedPortfolios = ref([])
 const selectedPortfolio = ref('')
+const klineContainer = ref(null)
+const klineCanvas = ref(null)
+const klineData = ref([])
+const klineLoading = ref(false)
+const klineError = ref('')
+const chartSymbol = ref('')
 
 const updateForm = reactive({
   market: market.value,
@@ -731,10 +894,56 @@ const jobStats = computed(() => {
   return stats
 })
 
+const lastUpdateSummary = computed(() => {
+  const job = store.jobs.find((item) => item.type === 'kl_update' && item.status === 'succeeded')
+  return job?.result || null
+})
+
 const backtestSummary = computed(() => {
   if (!store.activeJob || store.activeJob.type !== 'backtest') return null
   return store.activeJob.result?.summary || null
 })
+
+const backtestOrders = computed(() => {
+  if (!store.activeJob || store.activeJob.type !== 'backtest') return []
+  return store.activeJob.result?.orders || []
+})
+
+const backtestSymbols = computed(() => {
+  if (!store.activeJob || store.activeJob.type !== 'backtest') return []
+  const raw = store.activeJob.result?.summary?.symbols || store.activeJob.params?.symbols
+  if (Array.isArray(raw)) return raw
+  if (typeof raw === 'string') {
+    return raw
+      .split(/[\s,;]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+  }
+  return []
+})
+
+const backtestTradeStats = computed(() => {
+  const orders = backtestOrders.value || []
+  if (!orders.length) return null
+  const profits = orders.map((item) => Number(item.profit) || 0)
+  const total = orders.length
+  const wins = profits.filter((p) => p > 0).length
+  const totalProfit = profits.reduce((sum, val) => sum + val, 0)
+  const avgProfit = total ? totalProfit / total : 0
+  return {
+    total,
+    wins,
+    winRate: total ? (wins / total) * 100 : 0,
+    totalProfit,
+    avgProfit
+  }
+})
+
+const chartWindow = reactive({
+  size: 160,
+  offset: 0
+})
+const hoverInfo = ref(null)
 
 const gridSummary = computed(() => {
   if (!store.activeJob || store.activeJob.type !== 'grid_search') return null
@@ -752,6 +961,41 @@ const gridSummaryText = computed(() =>
 
 const analysisText = computed(() =>
   analysisResult.value ? JSON.stringify(analysisResult.value, null, 2) : ''
+)
+
+const applyGridToBacktest = () => {
+  if (!gridSummary.value) return
+  if (gridSummary.value.buy_xd) backtestForm.buy_xd = gridSummary.value.buy_xd
+  if (gridSummary.value.stop_loss_n !== undefined) backtestForm.stop_loss_n = gridSummary.value.stop_loss_n
+  if (gridSummary.value.stop_win_n !== undefined) backtestForm.stop_win_n = gridSummary.value.stop_win_n
+  if (Array.isArray(gridSummary.value.symbols) && gridSummary.value.symbols.length) {
+    backtestForm.symbols = gridSummary.value.symbols.join(', ')
+  }
+  if (gridSummary.value.market) backtestForm.market = gridSummary.value.market
+  activeTab.value = 'strategy'
+}
+
+watch(backtestSummary, (val) => {
+  if (!val) return
+  const symbols = backtestSymbols.value
+  if (symbols.length && !chartSymbol.value) {
+    chartSymbol.value = symbols[0]
+  }
+  if (chartSymbol.value) {
+    loadKlineChart()
+  }
+})
+
+watch(chartSymbol, (val, oldVal) => {
+  if (!val || val === oldVal) return
+  loadKlineChart()
+})
+
+watch(
+  () => [chartWindow.size, chartWindow.offset, klineData.value.length],
+  () => {
+    if (klineData.value.length) drawKline()
+  }
 )
 
 const activeParamsText = computed(() =>
@@ -792,6 +1036,226 @@ const brief = (v) => {
   if (!v) return ''
   const s = typeof v === 'string' ? v : JSON.stringify(v)
   return s.length > 60 ? `${s.slice(0, 57)}...` : s
+}
+
+const formatNumber = (value, digits = 2) => {
+  if (value === null || value === undefined) return '-'
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '-'
+  return num.toFixed(digits)
+}
+
+const toDateInt = (value) => {
+  if (value === null || value === undefined) return null
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  const raw = String(value).trim()
+  if (!raw) return null
+  if (/^\d{8}$/.test(raw)) return Number(raw)
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return null
+  const yyyy = date.getFullYear()
+  const mm = String(date.getMonth() + 1).padStart(2, '0')
+  const dd = String(date.getDate()).padStart(2, '0')
+  return Number(`${yyyy}${mm}${dd}`)
+}
+
+const getViewData = () => {
+  const data = klineData.value || []
+  if (!data.length) return []
+  const size = Math.max(40, Math.min(chartWindow.size || 160, data.length))
+  const maxOffset = Math.max(0, data.length - size)
+  if (chartWindow.offset > maxOffset) chartWindow.offset = maxOffset
+  if (chartWindow.offset < 0) chartWindow.offset = 0
+  const end = data.length - chartWindow.offset
+  const start = Math.max(0, end - size)
+  return data.slice(start, end)
+}
+
+const drawKline = () => {
+  const canvas = klineCanvas.value
+  const container = klineContainer.value
+  const data = getViewData()
+  if (!canvas || !container || !data.length) return
+  const width = Math.max(320, container.clientWidth)
+  const height = 320
+  const ratio = window.devicePixelRatio || 1
+  canvas.width = width * ratio
+  canvas.height = height * ratio
+  canvas.style.width = `${width}px`
+  canvas.style.height = `${height}px`
+
+  const ctx = canvas.getContext('2d')
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0)
+  ctx.clearRect(0, 0, width, height)
+
+  const padding = 24
+  const plotWidth = width - padding * 2
+  const plotHeight = height - padding * 2
+  const lows = data.map((d) => d.low ?? d.close ?? 0)
+  const highs = data.map((d) => d.high ?? d.close ?? 0)
+  const minLow = Math.min(...lows)
+  const maxHigh = Math.max(...highs)
+  const range = maxHigh - minLow || 1
+  const step = plotWidth / data.length
+  const candleWidth = Math.max(2, step * 0.55)
+
+  const mapY = (value) => padding + ((maxHigh - value) / range) * plotHeight
+
+  ctx.strokeStyle = 'rgba(27, 26, 24, 0.2)'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(padding, padding)
+  ctx.lineTo(padding, height - padding)
+  ctx.lineTo(width - padding, height - padding)
+  ctx.stroke()
+
+  const indexMap = new Map(data.map((item, idx) => [item.date, idx]))
+
+  data.forEach((item, idx) => {
+    const open = Number(item.open ?? item.close ?? 0)
+    const close = Number(item.close ?? item.open ?? 0)
+    const high = Number(item.high ?? Math.max(open, close))
+    const low = Number(item.low ?? Math.min(open, close))
+    const x = padding + idx * step + step * 0.5
+    const yOpen = mapY(open)
+    const yClose = mapY(close)
+    const yHigh = mapY(high)
+    const yLow = mapY(low)
+    const isUp = close >= open
+    const color = isUp ? '#1f7a4b' : '#b33a3a'
+
+    ctx.strokeStyle = color
+    ctx.beginPath()
+    ctx.moveTo(x, yHigh)
+    ctx.lineTo(x, yLow)
+    ctx.stroke()
+
+    const bodyTop = Math.min(yOpen, yClose)
+    const bodyHeight = Math.max(2, Math.abs(yClose - yOpen))
+    ctx.fillStyle = color
+    ctx.fillRect(x - candleWidth / 2, bodyTop, candleWidth, bodyHeight)
+  })
+
+  const orders = backtestOrders.value || []
+  orders.forEach((order) => {
+    const buyDate = toDateInt(order.buy_date)
+    const sellDate = toDateInt(order.sell_date)
+    if (buyDate && indexMap.has(buyDate)) {
+      const idx = indexMap.get(buyDate)
+      const price = Number(order.buy_price ?? data[idx]?.close ?? 0)
+      const x = padding + idx * step + step * 0.5
+      const y = mapY(price) - 8
+      ctx.fillStyle = '#0f1b2e'
+      ctx.beginPath()
+      ctx.moveTo(x, y)
+      ctx.lineTo(x - 6, y - 10)
+      ctx.lineTo(x + 6, y - 10)
+      ctx.closePath()
+      ctx.fill()
+    }
+    if (sellDate && indexMap.has(sellDate)) {
+      const idx = indexMap.get(sellDate)
+      const price = Number(order.sell_price ?? data[idx]?.close ?? 0)
+      const x = padding + idx * step + step * 0.5
+      const y = mapY(price) + 8
+      ctx.fillStyle = '#c17f2f'
+      ctx.beginPath()
+      ctx.moveTo(x, y)
+      ctx.lineTo(x - 6, y + 10)
+      ctx.lineTo(x + 6, y + 10)
+      ctx.closePath()
+      ctx.fill()
+    }
+  })
+
+  if (hoverInfo.value) {
+    const idx = hoverInfo.value.index
+    const hoverItem = data[idx]
+    if (hoverItem) {
+      const x = padding + idx * step + step * 0.5
+      const y = mapY(Number(hoverItem.close ?? hoverItem.open ?? 0))
+      ctx.strokeStyle = 'rgba(27, 26, 24, 0.25)'
+      ctx.lineWidth = 1
+      ctx.beginPath()
+      ctx.moveTo(x, padding)
+      ctx.lineTo(x, height - padding)
+      ctx.stroke()
+      ctx.beginPath()
+      ctx.moveTo(padding, y)
+      ctx.lineTo(width - padding, y)
+      ctx.stroke()
+    }
+  }
+}
+
+const handleKlineHover = (event) => {
+  const canvas = klineCanvas.value
+  const container = klineContainer.value
+  const data = getViewData()
+  if (!canvas || !container || !data.length) return
+  const rect = canvas.getBoundingClientRect()
+  const x = event.clientX - rect.left
+  const padding = 24
+  const plotWidth = Math.max(10, rect.width - padding * 2)
+  const step = plotWidth / data.length
+  const idx = Math.min(data.length - 1, Math.max(0, Math.floor((x - padding) / step)))
+  const item = data[idx]
+  if (!item) return
+  hoverInfo.value = {
+    index: idx,
+    date: item.date,
+    open: item.open,
+    close: item.close,
+    high: item.high,
+    low: item.low,
+    volume: item.volume
+  }
+  drawKline()
+}
+
+const clearKlineHover = () => {
+  hoverInfo.value = null
+  drawKline()
+}
+
+const shiftWindow = (direction) => {
+  const data = klineData.value || []
+  if (!data.length) return
+  const step = Math.max(10, Math.floor(chartWindow.size / 5))
+  const size = Math.max(40, Math.min(chartWindow.size || 160, data.length))
+  const maxOffset = Math.max(0, data.length - size)
+  const next = Math.min(maxOffset, Math.max(0, chartWindow.offset + direction * step))
+  chartWindow.offset = next
+  drawKline()
+}
+
+const loadKlineChart = async () => {
+  const symbols = backtestSymbols.value.length
+    ? backtestSymbols.value
+    : backtestForm.symbols.split(/[\s,;]+/).filter(Boolean)
+  if (!symbols.length) return
+  if (!chartSymbol.value) chartSymbol.value = symbols[0]
+  klineLoading.value = true
+  klineError.value = ''
+  try {
+    const { data } = await api.get('/quant/klines', {
+      params: {
+        symbol: chartSymbol.value,
+        market: backtestForm.market,
+        start: backtestForm.start || undefined,
+        end: backtestForm.end || undefined,
+        limit: 400
+      }
+    })
+    klineData.value = data.data?.items || []
+    chartWindow.offset = 0
+    await nextTick()
+    drawKline()
+  } catch (err) {
+    klineError.value = err.message
+  } finally {
+    klineLoading.value = false
+  }
 }
 
 const parseNumberList = (raw) =>
@@ -1083,8 +1547,13 @@ const runTool = async () => {
   await store.fetchJob(job.id)
 }
 
+const handleResize = () => {
+  if (klineData.value.length) drawKline()
+}
+
 onMounted(async () => {
   savedPortfolios.value = JSON.parse(localStorage.getItem('doraemon_portfolios') || '[]')
+  window.addEventListener('resize', handleResize)
   await Promise.all([
     store.fetchJobs(),
     store.searchSymbols({
@@ -1095,5 +1564,9 @@ onMounted(async () => {
       pageSize: store.pageSize
     })
   ])
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize)
 })
 </script>
