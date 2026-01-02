@@ -16,7 +16,10 @@ export const useQuantStore = defineStore('quant', {
     jobsLoading: false,
     jobsError: null,
     activeJob: null,
-    activeJobLoading: false
+    activeJobLoading: false,
+    strategies: { buy: [], sell: [] },
+    strategiesLoading: false,
+    strategiesError: null
   }),
   actions: {
     async searchSymbols({ market, q, kind, page, pageSize } = {}) {
@@ -129,6 +132,18 @@ export const useQuantStore = defineStore('quant', {
       this.activeJob = job
       await this.fetchJobs()
       return job
+    },
+    async fetchStrategies() {
+      this.strategiesLoading = true
+      this.strategiesError = null
+      try {
+        const { data } = await api.get('/quant/strategies')
+        this.strategies = data.data || { buy: [], sell: [] }
+      } catch (err) {
+        this.strategiesError = err.message
+      } finally {
+        this.strategiesLoading = false
+      }
     }
   }
 })

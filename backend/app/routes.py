@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
+from itertools import product
 from pathlib import Path
 import csv
 import io
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from . import crud, schemas
 from .database import get_db, SessionLocal
+from .strategies import MacdCrossBuy, MacdCrossSell
 
 router = APIRouter()
 quant_router = APIRouter(prefix="/quant", tags=["quant"])
@@ -39,6 +41,166 @@ DEFAULT_BENCHMARKS = {
     "SH": "sh000001",
     "SZ": "sz399001",
     "300": "sz399006",
+}
+
+STRATEGY_CATALOG = {
+    "buy": [
+        {
+            "id": "breakout",
+            "name": "突破",
+            "desc": "N日新高突破买入",
+            "params": [{"key": "xd", "label": "突破周期", "type": "int", "default": 42, "min": 5}],
+        },
+        {
+            "id": "double_ma",
+            "name": "双均线",
+            "desc": "快慢均线金叉买入",
+            "params": [
+                {"key": "fast", "label": "快线周期", "type": "int", "default": 5, "min": 2},
+                {"key": "slow", "label": "慢线周期", "type": "int", "default": 60, "min": 5},
+                {"key": "resample_min", "label": "最小重采样", "type": "int", "default": 10, "min": 5},
+                {"key": "resample_max", "label": "最大重采样", "type": "int", "default": 100, "min": 10},
+                {"key": "change_threshold", "label": "波动阈值", "type": "float", "default": 0.12, "step": 0.01},
+            ],
+        },
+        {
+            "id": "up_down_trend",
+            "name": "趋势回调",
+            "desc": "长趋势上升 + 短期回调买入",
+            "params": [
+                {"key": "xd", "label": "短期周期", "type": "int", "default": 20, "min": 5},
+                {"key": "past_factor", "label": "长期系数", "type": "int", "default": 4, "min": 2},
+                {"key": "up_deg_threshold", "label": "趋势阈值", "type": "float", "default": 3, "step": 0.5},
+            ],
+        },
+        {
+            "id": "up_down_golden",
+            "name": "黄金分割",
+            "desc": "上升趋势 + 黄金分割回调买入",
+            "params": [
+                {"key": "xd", "label": "短期周期", "type": "int", "default": 20, "min": 5},
+                {"key": "past_factor", "label": "长期系数", "type": "int", "default": 4, "min": 2},
+                {"key": "up_deg_threshold", "label": "趋势阈值", "type": "float", "default": 3, "step": 0.5},
+            ],
+        },
+        {
+            "id": "down_up_trend",
+            "name": "反转趋势",
+            "desc": "下跌趋势 + 短期反转买入",
+            "params": [
+                {"key": "xd", "label": "短期周期", "type": "int", "default": 20, "min": 5},
+                {"key": "past_factor", "label": "长期系数", "type": "int", "default": 4, "min": 2},
+                {"key": "down_deg_threshold", "label": "趋势阈值", "type": "float", "default": -3, "step": 0.5},
+            ],
+        },
+        {
+            "id": "week_win",
+            "name": "周胜率",
+            "desc": "周胜率回归择时",
+            "params": [
+                {"key": "buy_dw", "label": "胜率阈值", "type": "float", "default": 0.55, "step": 0.01},
+                {"key": "buy_dwm", "label": "涨幅阈值", "type": "float", "default": 0.618, "step": 0.01},
+                {"key": "dw_period", "label": "回溯周期", "type": "int", "default": 40, "min": 10},
+            ],
+        },
+        {
+            "id": "momentum_break",
+            "name": "动量突破",
+            "desc": "区间新高突破动量",
+            "params": [{"key": "xd", "label": "突破周期", "type": "int", "default": 20, "min": 5}],
+        },
+        {
+            "id": "put_break",
+            "name": "向下突破(做空)",
+            "desc": "跌破区间新低触发买入(看空)",
+            "params": [{"key": "xd", "label": "突破周期", "type": "int", "default": 20, "min": 5}],
+        },
+        {
+            "id": "put_xdbk",
+            "name": "向下突破(区间)",
+            "desc": "区间新低突破买入(看空)",
+            "params": [{"key": "xd", "label": "突破周期", "type": "int", "default": 20, "min": 5}],
+        },
+        {
+            "id": "macd_cross",
+            "name": "MACD 金叉",
+            "desc": "DIF 上穿 DEA",
+            "params": [
+                {"key": "fast_period", "label": "快线周期", "type": "int", "default": 12, "min": 2},
+                {"key": "slow_period", "label": "慢线周期", "type": "int", "default": 26, "min": 5},
+                {"key": "signal_period", "label": "信号周期", "type": "int", "default": 9, "min": 3},
+            ],
+        },
+    ],
+    "sell": [
+        {
+            "id": "atr_stop",
+            "name": "ATR 止损止盈",
+            "desc": "ATR 动态止损止盈",
+            "params": [
+                {"key": "stop_loss_n", "label": "止损倍数", "type": "float", "default": 0.5, "step": 0.1},
+                {"key": "stop_win_n", "label": "止盈倍数", "type": "float", "default": 3.0, "step": 0.1},
+            ],
+        },
+        {
+            "id": "atr_close",
+            "name": "收盘 ATR 止损",
+            "desc": "使用收盘价触发 ATR 止损",
+            "params": [
+                {"key": "stop_loss_n", "label": "止损倍数", "type": "float", "default": 0.5, "step": 0.1},
+                {"key": "stop_win_n", "label": "止盈倍数", "type": "float", "default": 3.0, "step": 0.1},
+            ],
+        },
+        {
+            "id": "atr_pre",
+            "name": "预警 ATR 止损",
+            "desc": "使用前一日 ATR 触发止损",
+            "params": [
+                {"key": "stop_loss_n", "label": "止损倍数", "type": "float", "default": 0.5, "step": 0.1},
+                {"key": "stop_win_n", "label": "止盈倍数", "type": "float", "default": 3.0, "step": 0.1},
+            ],
+        },
+        {
+            "id": "sell_break",
+            "name": "向下突破止盈",
+            "desc": "跌破区间低点卖出",
+            "params": [{"key": "xd", "label": "突破周期", "type": "int", "default": 20, "min": 5}],
+        },
+        {
+            "id": "sell_xdbk",
+            "name": "向下突破(区间)卖出",
+            "desc": "区间新低触发卖出",
+            "params": [{"key": "xd", "label": "突破周期", "type": "int", "default": 20, "min": 5}],
+        },
+        {
+            "id": "sell_n_day",
+            "name": "N 日卖出",
+            "desc": "持有 N 日后卖出",
+            "params": [
+                {"key": "sell_n", "label": "持有天数", "type": "int", "default": 5, "min": 1},
+                {"key": "is_sell_today", "label": "当天卖出", "type": "bool", "default": False},
+            ],
+        },
+        {
+            "id": "double_ma_sell",
+            "name": "均线死叉卖出",
+            "desc": "快线下穿慢线卖出",
+            "params": [
+                {"key": "fast", "label": "快线周期", "type": "int", "default": 5, "min": 2},
+                {"key": "slow", "label": "慢线周期", "type": "int", "default": 60, "min": 5},
+            ],
+        },
+        {
+            "id": "macd_cross",
+            "name": "MACD 死叉",
+            "desc": "DIF 下穿 DEA",
+            "params": [
+                {"key": "fast_period", "label": "快线周期", "type": "int", "default": 12, "min": 2},
+                {"key": "slow_period", "label": "慢线周期", "type": "int", "default": 26, "min": 5},
+                {"key": "signal_period", "label": "信号周期", "type": "int", "default": 9, "min": 3},
+            ],
+        },
+    ],
 }
 
 
@@ -132,6 +294,231 @@ def _safe_int(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _params_dict(raw):
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+def _find_strategy_defaults(strategy_id: str, group: str) -> dict:
+    for item in STRATEGY_CATALOG.get(group, []):
+        if item.get("id") == strategy_id:
+            return {param["key"]: param.get("default") for param in item.get("params", [])}
+    return {}
+
+
+def _merge_params(defaults: dict, overrides: dict) -> dict:
+    merged = dict(defaults or {})
+    for key, value in (overrides or {}).items():
+        merged[key] = value
+    return merged
+
+
+def _param_int(config: dict, key: str, fallback: int) -> int:
+    value = _safe_int(config.get(key))
+    return fallback if value is None else value
+
+
+def _param_float(config: dict, key: str, fallback: float) -> float:
+    value = _safe_float(config.get(key))
+    return fallback if value is None else value
+
+
+def _grid_values(raw):
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return [item for item in re.split(r"[\s,;]+", raw) if item]
+    if isinstance(raw, (list, tuple, set)):
+        return list(raw)
+    return [raw]
+
+
+def _build_param_grid(defaults: dict, grid: dict) -> list[dict]:
+    if not grid:
+        return [dict(defaults or {})]
+    keys = []
+    values = []
+    for key, raw in grid.items():
+        items = _grid_values(raw)
+        if not items:
+            continue
+        keys.append(key)
+        values.append(items)
+    if not keys:
+        return [dict(defaults or {})]
+    combos = []
+    for combo in product(*values):
+        params = dict(defaults or {})
+        params.update(dict(zip(keys, combo)))
+        combos.append(params)
+    return combos
+
+
+def _build_buy_factors(params: dict) -> list[dict]:
+    from abupy.FactorBuyBu import AbuFactorBuyBreak
+    from abupy.FactorBuyBu.ABuFactorBuyBreak import (
+        AbuFactorBuyXDBK,
+        AbuFactorBuyPutBreak,
+        AbuFactorBuyPutXDBK,
+    )
+    from abupy.FactorBuyBu.ABuFactorBuyDM import AbuDoubleMaBuy
+    from abupy.FactorBuyBu.ABuFactorBuyTrend import AbuDownUpTrend, AbuUpDownGolden, AbuUpDownTrend
+    from abupy.FactorBuyBu.ABuFactorBuyWD import AbuFactorBuyWD
+
+    strategy_id = (params.get("buy_strategy") or "breakout").strip().lower()
+    defaults = _find_strategy_defaults(strategy_id, "buy")
+    config = _merge_params(defaults, _params_dict(params.get("buy_params")))
+
+    if strategy_id in {"breakout", "break"}:
+        xd = _param_int(config, "xd", _param_int(params, "buy_xd", 42))
+        return [{"class": AbuFactorBuyBreak, "xd": xd}]
+    if strategy_id == "momentum_break":
+        xd = _param_int(config, "xd", 20)
+        return [{"class": AbuFactorBuyXDBK, "xd": xd}]
+    if strategy_id == "double_ma":
+        return [
+            {
+                "class": AbuDoubleMaBuy,
+                "fast": _param_int(config, "fast", 5),
+                "slow": _param_int(config, "slow", 60),
+                "resample_min": _param_int(config, "resample_min", 10),
+                "resample_max": _param_int(config, "resample_max", 100),
+                "change_threshold": _param_float(config, "change_threshold", 0.12),
+            }
+        ]
+    if strategy_id == "up_down_trend":
+        return [
+            {
+                "class": AbuUpDownTrend,
+                "xd": _param_int(config, "xd", 20),
+                "past_factor": _param_int(config, "past_factor", 4),
+                "up_deg_threshold": _param_float(config, "up_deg_threshold", 3),
+            }
+        ]
+    if strategy_id == "up_down_golden":
+        return [
+            {
+                "class": AbuUpDownGolden,
+                "xd": _param_int(config, "xd", 20),
+                "past_factor": _param_int(config, "past_factor", 4),
+                "up_deg_threshold": _param_float(config, "up_deg_threshold", 3),
+            }
+        ]
+    if strategy_id == "down_up_trend":
+        return [
+            {
+                "class": AbuDownUpTrend,
+                "xd": _param_int(config, "xd", 20),
+                "past_factor": _param_int(config, "past_factor", 4),
+                "down_deg_threshold": _param_float(config, "down_deg_threshold", -3),
+            }
+        ]
+    if strategy_id == "week_win":
+        return [
+            {
+                "class": AbuFactorBuyWD,
+                "buy_dw": _param_float(config, "buy_dw", 0.55),
+                "buy_dwm": _param_float(config, "buy_dwm", 0.618),
+                "dw_period": _param_int(config, "dw_period", 40),
+            }
+        ]
+    if strategy_id == "macd_cross":
+        return [
+            {
+                "class": MacdCrossBuy,
+                "fast_period": _param_int(config, "fast_period", 12),
+                "slow_period": _param_int(config, "slow_period", 26),
+                "signal_period": _param_int(config, "signal_period", 9),
+            }
+        ]
+    if strategy_id == "put_break":
+        xd = _param_int(config, "xd", 20)
+        return [{"class": AbuFactorBuyPutBreak, "xd": xd}]
+    if strategy_id == "put_xdbk":
+        xd = _param_int(config, "xd", 20)
+        return [{"class": AbuFactorBuyPutXDBK, "xd": xd}]
+
+    xd = _param_int(config, "xd", _param_int(params, "buy_xd", 42))
+    return [{"class": AbuFactorBuyBreak, "xd": xd}]
+
+
+def _build_sell_factors(params: dict) -> list[dict]:
+    from abupy.FactorSellBu import AbuFactorAtrNStop
+    from abupy.FactorSellBu.ABuFactorCloseAtrNStop import AbuFactorCloseAtrNStop
+    from abupy.FactorSellBu.ABuFactorPreAtrNStop import AbuFactorPreAtrNStop
+    from abupy.FactorSellBu.ABuFactorSellBreak import AbuFactorSellBreak
+    from abupy.FactorSellBu.ABuFactorSellBreak import AbuFactorSellXDBK
+    from abupy.FactorSellBu.ABuFactorSellNDay import AbuFactorSellNDay
+    from abupy.FactorSellBu.ABuFactorSellDM import AbuDoubleMaSell
+
+    strategy_id = (params.get("sell_strategy") or "atr_stop").strip().lower()
+    defaults = _find_strategy_defaults(strategy_id, "sell")
+    config = _merge_params(defaults, _params_dict(params.get("sell_params")))
+
+    if strategy_id == "atr_stop":
+        return [
+            {
+                "class": AbuFactorAtrNStop,
+                "stop_loss_n": _param_float(config, "stop_loss_n", _param_float(params, "stop_loss_n", 0.5)),
+                "stop_win_n": _param_float(config, "stop_win_n", _param_float(params, "stop_win_n", 3.0)),
+            }
+        ]
+    if strategy_id == "atr_close":
+        return [
+            {
+                "class": AbuFactorCloseAtrNStop,
+                "stop_loss_n": _param_float(config, "stop_loss_n", 0.5),
+                "stop_win_n": _param_float(config, "stop_win_n", 3.0),
+            }
+        ]
+    if strategy_id == "atr_pre":
+        return [
+            {
+                "class": AbuFactorPreAtrNStop,
+                "stop_loss_n": _param_float(config, "stop_loss_n", 0.5),
+                "stop_win_n": _param_float(config, "stop_win_n", 3.0),
+            }
+        ]
+    if strategy_id == "sell_break":
+        return [{"class": AbuFactorSellBreak, "xd": _param_int(config, "xd", 20)}]
+    if strategy_id == "sell_xdbk":
+        return [{"class": AbuFactorSellXDBK, "xd": _param_int(config, "xd", 20)}]
+    if strategy_id == "sell_n_day":
+        return [
+            {
+                "class": AbuFactorSellNDay,
+                "sell_n": _param_int(config, "sell_n", 5),
+                "is_sell_today": bool(config.get("is_sell_today", False)),
+            }
+        ]
+    if strategy_id == "double_ma_sell":
+        return [
+            {
+                "class": AbuDoubleMaSell,
+                "fast": _param_int(config, "fast", 5),
+                "slow": _param_int(config, "slow", 60),
+            }
+        ]
+    if strategy_id == "macd_cross":
+        return [
+            {
+                "class": MacdCrossSell,
+                "fast_period": _param_int(config, "fast_period", 12),
+                "slow_period": _param_int(config, "slow_period", 26),
+                "signal_period": _param_int(config, "signal_period", 9),
+            }
+        ]
+
+    return [
+        {
+            "class": AbuFactorAtrNStop,
+            "stop_loss_n": _param_float(config, "stop_loss_n", _param_float(params, "stop_loss_n", 0.5)),
+            "stop_win_n": _param_float(config, "stop_win_n", _param_float(params, "stop_win_n", 3.0)),
+        }
+    ]
 
 
 def _parse_trade_date(value) -> Optional[date]:
@@ -808,6 +1195,11 @@ def get_klines(
     )
 
 
+@quant_router.get("/strategies", response_model=schemas.APIResponse)
+def list_strategies():
+    return schemas.APIResponse(data=STRATEGY_CATALOG)
+
+
 def _run_job(job_id: int):
     db = SessionLocal()
     try:
@@ -866,8 +1258,6 @@ def _run_job(job_id: int):
 
         if job.type == "backtest":
             from abupy import abu
-            from abupy.FactorBuyBu import AbuFactorBuyBreak
-            from abupy.FactorSellBu import AbuFactorAtrNStop
 
             market = (job.params.get("market") or "CN").upper()
             symbols = _normalize_symbols(job.params.get("symbols"), market)
@@ -895,14 +1285,8 @@ def _run_job(job_id: int):
                 job.params.get("n_folds", 1),
             ):
                 benchmark_symbol = available_symbols[0]
-            buy_factors = [{"class": AbuFactorBuyBreak, "xd": job.params.get("buy_xd", 42)}]
-            sell_factors = [
-                {
-                    "class": AbuFactorAtrNStop,
-                    "stop_loss_n": job.params.get("stop_loss_n", 0.5),
-                    "stop_win_n": job.params.get("stop_win_n", 3.0),
-                }
-            ]
+            buy_factors = _build_buy_factors(job.params)
+            sell_factors = _build_sell_factors(job.params)
             fallback_symbol = benchmark_symbol
             with _with_pg_data_env(market), _with_benchmark_fallback(fallback_symbol):
                 abu_result, _ = abu.run_loop_back(
@@ -999,11 +1383,7 @@ def _run_job(job_id: int):
             return
 
         if job.type == "grid_search":
-            from itertools import product
-
             from abupy import abu
-            from abupy.FactorBuyBu import AbuFactorBuyBreak
-            from abupy.FactorSellBu import AbuFactorAtrNStop
 
             market = (job.params.get("market") or "CN").upper()
             symbols = _normalize_symbols(job.params.get("symbols"), market)
@@ -1024,44 +1404,69 @@ def _run_job(job_id: int):
             if not _ensure_symbol_klines(db, benchmark_symbol, start, end, n_folds):
                 benchmark_symbol = available_symbols[0]
 
-            buy_xd_list = job.params.get("buy_xd_list") or [20, 42, 60]
-            stop_loss_n_list = job.params.get("stop_loss_n_list") or [0.5, 1.0]
-            stop_win_n_list = job.params.get("stop_win_n_list") or [2.0, 3.0]
+            buy_strategy = (job.params.get("buy_strategy") or "breakout").strip().lower()
+            sell_strategy = (job.params.get("sell_strategy") or "atr_stop").strip().lower()
+            buy_defaults = _find_strategy_defaults(buy_strategy, "buy")
+            sell_defaults = _find_strategy_defaults(sell_strategy, "sell")
+            buy_params_grid = job.params.get("buy_params_grid") or {}
+            sell_params_grid = job.params.get("sell_params_grid") or {}
+
+            if "xd" not in buy_params_grid and job.params.get("buy_xd_list"):
+                buy_params_grid["xd"] = job.params.get("buy_xd_list")
+            if "stop_loss_n" not in sell_params_grid and job.params.get("stop_loss_n_list"):
+                sell_params_grid["stop_loss_n"] = job.params.get("stop_loss_n_list")
+            if "stop_win_n" not in sell_params_grid and job.params.get("stop_win_n_list"):
+                sell_params_grid["stop_win_n"] = job.params.get("stop_win_n_list")
+
+            buy_param_sets = _build_param_grid(buy_defaults, buy_params_grid)
+            sell_param_sets = _build_param_grid(sell_defaults, sell_params_grid)
             max_runs = int(job.params.get("max_runs", 30))
             max_runs = max(1, min(max_runs, 200))
 
             runs = []
             fallback_symbol = benchmark_symbol
             with _with_pg_data_env(market), _with_benchmark_fallback(fallback_symbol):
-                for i, (buy_xd, stop_loss_n, stop_win_n) in enumerate(
-                    product(buy_xd_list, stop_loss_n_list, stop_win_n_list)
-                ):
-                    if i >= max_runs:
+                run_index = 0
+                for buy_params in buy_param_sets:
+                    for sell_params in sell_param_sets:
+                        if run_index >= max_runs:
+                            break
+                        combo_params = dict(job.params)
+                        combo_params["buy_strategy"] = buy_strategy
+                        combo_params["sell_strategy"] = sell_strategy
+                        combo_params["buy_params"] = buy_params
+                        combo_params["sell_params"] = sell_params
+                        buy_factors = _build_buy_factors(combo_params)
+                        sell_factors = _build_sell_factors(combo_params)
+                        run_index += 1
+                        abu_result, _ = abu.run_loop_back(
+                            read_cash=cash,
+                            buy_factors=buy_factors,
+                            sell_factors=sell_factors,
+                            choice_symbols=symbols,
+                            n_folds=n_folds,
+                            start=start,
+                            end=end,
+                            n_process_kl=1,
+                            n_process_pick=1,
+                        )
+                        if abu_result is None:
+                            continue
+                        summary = {
+                            "buy_strategy": buy_strategy,
+                            "sell_strategy": sell_strategy,
+                            "buy_params": buy_params,
+                            "sell_params": sell_params,
+                            "buy_xd": buy_params.get("xd"),
+                            "stop_loss_n": sell_params.get("stop_loss_n"),
+                            "stop_win_n": sell_params.get("stop_win_n"),
+                            "orders_rows": int(getattr(abu_result.orders_pd, "shape", [0])[0]),
+                            "actions_rows": int(getattr(abu_result.action_pd, "shape", [0])[0]),
+                            "benchmark": getattr(getattr(abu_result, "benchmark", None), "symbol", None),
+                        }
+                        runs.append(summary)
+                    if run_index >= max_runs:
                         break
-                    buy_factors = [{"class": AbuFactorBuyBreak, "xd": buy_xd}]
-                    sell_factors = [{"class": AbuFactorAtrNStop, "stop_loss_n": stop_loss_n, "stop_win_n": stop_win_n}]
-                    abu_result, _ = abu.run_loop_back(
-                        read_cash=cash,
-                        buy_factors=buy_factors,
-                        sell_factors=sell_factors,
-                        choice_symbols=symbols,
-                        n_folds=n_folds,
-                        start=start,
-                        end=end,
-                        n_process_kl=1,
-                        n_process_pick=1,
-                    )
-                    if abu_result is None:
-                        continue
-                    summary = {
-                        "buy_xd": buy_xd,
-                        "stop_loss_n": stop_loss_n,
-                        "stop_win_n": stop_win_n,
-                        "orders_rows": int(getattr(abu_result.orders_pd, "shape", [0])[0]),
-                        "actions_rows": int(getattr(abu_result.action_pd, "shape", [0])[0]),
-                        "benchmark": getattr(getattr(abu_result, "benchmark", None), "symbol", None),
-                    }
-                    runs.append(summary)
 
             runs_sorted = sorted(runs, key=lambda x: (x.get("orders_rows", 0), x.get("actions_rows", 0)), reverse=True)
             best = runs_sorted[0] if runs_sorted else None
@@ -1071,6 +1476,8 @@ def _run_job(job_id: int):
                 {
                     "market": market,
                     "symbols": symbols,
+                    "buy_strategy": buy_strategy,
+                    "sell_strategy": sell_strategy,
                     "max_runs": max_runs,
                     "best": best,
                     "runs": runs_sorted[:200],

@@ -60,744 +60,132 @@
       </div>
     </section>
 
-    <section class="grid grid-2" v-show="activeTab === 'prepare'">
-      <div class="panel glass">
-        <header class="panel-title">
-          <div>
-            <h2>股票检索</h2>
-            <p class="muted">检索股票代码、公司名称与交易所信息。</p>
-          </div>
-          <span class="pill">Symbols</span>
-        </header>
-        <p class="panel-note">建议先导入股票库，再检索并加入选股篮。选股篮会同步到更新、回测、寻优与分析。</p>
-        <div class="form-grid">
-          <div>
-            <label class="label">市场</label>
-            <select v-model="market" class="select">
-              <option value="SH">SH (Shanghai)</option>
-              <option value="SZ">SZ (Shenzhen)</option>
-              <option value="300">300 (ChiNext)</option>
-            </select>
-          </div>
-          <div>
-            <label class="label">关键词</label>
-            <input v-model="query" placeholder="symbol / 公司名 / 关键字" @keyup.enter="search" />
-          </div>
-          <div>
-            <label class="label">类型</label>
-            <select v-model="kind" class="select">
-              <option value="stock">个股</option>
-              <option value="index">指数</option>
-              <option value="all">全部</option>
-            </select>
-          </div>
-        </div>
-        <div class="toolbar">
-          <button class="btn-secondary" @click="search" :disabled="store.symbolsLoading">查询</button>
-          <button class="btn-ghost" @click="importSymbols" :disabled="store.symbolsLoading">初始化当前市场</button>
-          <button class="btn-ghost" @click="importAllSymbols" :disabled="store.symbolsLoading">导入全部A股</button>
-          <button class="btn-ghost" @click="selectPage" :disabled="store.symbolsLoading">全选当前页</button>
-          <button class="btn-ghost" @click="invertPage" :disabled="store.symbolsLoading">反选当前页</button>
-          <span class="muted">{{ store.symbolsLoading ? '加载中…' : ' ' }}</span>
-          <span v-if="selectedSymbols.length" class="muted">已选 {{ selectedSymbols.length }} 只</span>
-        </div>
-        <p v-if="store.symbolsError" class="error">{{ store.symbolsError }}</p>
-        <div class="table-wrap" v-if="!store.symbolsLoading">
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Symbol</th>
-                <th>Market</th>
-                <th>Type</th>
-                <th>Name</th>
-                <th>Exchange</th>
-                <th>Industry</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="item in store.symbols" :key="`${item.market}-${item.symbol}`">
-                <td class="mono">{{ displaySymbol(item) }}</td>
-                <td>{{ item.market }}</td>
-                <td>{{ displayKind(item.kind) }}</td>
-                <td>{{ item.name || '-' }}</td>
-                <td>{{ item.exchange || '-' }}</td>
-                <td>{{ item.industry || '-' }}</td>
-                <td>
-                  <button class="btn-ghost" @click="toggleSymbol(item.symbol)">
-                    {{ isSelected(item.symbol) ? '移除' : '使用' }}
-                  </button>
-                </td>
-              </tr>
-              <tr v-if="store.symbols.length === 0">
-                <td colspan="7" class="muted">暂无结果</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div v-if="selectedSymbols.length" class="selection">
-          <div class="selection-head">
-            <span class="pill">选股篮</span>
-            <div class="selection-actions">
-              <button class="btn-secondary" @click="clearSymbols">清空</button>
-              <button class="btn-secondary" @click="saveSelection">保存组合</button>
-            </div>
-          </div>
-          <div class="selection-load">
-            <select v-model="selectedPortfolio" class="select">
-              <option value="">加载组合</option>
-              <option v-for="name in savedPortfolios" :key="name" :value="name">{{ name }}</option>
-            </select>
-            <button class="btn-secondary" @click="loadPortfolio" :disabled="!selectedPortfolio">加载</button>
-            <button class="btn-secondary" @click="deletePortfolio" :disabled="!selectedPortfolio">删除</button>
-          </div>
-          <div class="selection-chips">
-            <button v-for="symbol in selectedSymbols" :key="symbol" class="chip" @click="removeSymbol(symbol)">
-              {{ symbol }}
-              <span class="chip-close">×</span>
-            </button>
-          </div>
-        </div>
-        <div class="pager">
-          <span class="muted">共 {{ store.total }} 条</span>
-          <div class="pager-controls">
-            <button class="btn-secondary" @click="changePage(store.page - 1)" :disabled="store.page <= 1">
-              上一页
-            </button>
-            <span class="mono">{{ store.page }} / {{ totalPages }}</span>
-            <button class="btn-secondary" @click="changePage(store.page + 1)" :disabled="store.page >= totalPages">
-              下一页
-            </button>
-          </div>
-          <div class="pager-size">
-            <span class="muted">每页</span>
-            <select v-model.number="pageSize" class="select" @change="applyPageSize">
-              <option :value="20">20</option>
-              <option :value="50">50</option>
-              <option :value="100">100</option>
-            </select>
-          </div>
-        </div>
-      </div>
+    
+    <PreparePanel
+      :active="activeTab === 'prepare'"
+      :store="store"
+      v-model:market="market"
+      v-model:query="query"
+      v-model:kind="kind"
+      v-model:pageSize="pageSize"
+      v-model:selectedPortfolio="selectedPortfolio"
+      :selected-symbols="selectedSymbols"
+      :saved-portfolios="savedPortfolios"
+      :update-form="updateForm"
+      :last-update-summary="lastUpdateSummary"
+      :total-pages="totalPages"
+      :actions-busy="actionsBusy"
+      :search="search"
+      :import-symbols="importSymbols"
+      :import-all-symbols="importAllSymbols"
+      :select-page="selectPage"
+      :invert-page="invertPage"
+      :display-symbol="displaySymbol"
+      :display-kind="displayKind"
+      :toggle-symbol="toggleSymbol"
+      :is-selected="isSelected"
+      :clear-symbols="clearSymbols"
+      :save-selection="saveSelection"
+      :load-portfolio="loadPortfolio"
+      :delete-portfolio="deletePortfolio"
+      :remove-symbol="removeSymbol"
+      :change-page="changePage"
+      :apply-page-size="applyPageSize"
+      :run-kl-update="runKlUpdate"
+    />
 
-      <div class="panel glass">
-        <header class="panel-title">
-          <div>
-            <h2>数据更新</h2>
-            <p class="muted">批量更新市场数据缓存，建议先执行。</p>
-          </div>
-          <span class="pill">Update</span>
-        </header>
-        <p class="panel-note">更新会将K线写入PG；建议回溯至少 1 年。选股篮为空时将全量更新当前市场。</p>
-        <div class="form-grid">
-          <div>
-            <label class="label">回溯年数</label>
-            <input v-model.number="updateForm.n_folds" type="number" min="1" />
-          </div>
-          <div>
-            <label class="label">并发数</label>
-            <input v-model.number="updateForm.n_jobs" type="number" min="1" />
-          </div>
-          <div>
-            <label class="label">开始日期</label>
-            <input v-model="updateForm.start" type="date" />
-          </div>
-          <div>
-            <label class="label">结束日期</label>
-            <input v-model="updateForm.end" type="date" />
-          </div>
-          <div>
-            <label class="label">执行模式</label>
-            <select v-model="updateForm.how" class="select">
-              <option value="thread">thread</option>
-              <option value="process">process</option>
-              <option value="main">main</option>
-            </select>
-          </div>
-        </div>
-        <div class="toolbar">
-          <button class="btn-primary" @click="runKlUpdate" :disabled="actionsBusy">启动更新</button>
-          <span class="muted">将创建异步任务</span>
-        </div>
-        <div class="update-targets">
-          <p class="muted">更新标的</p>
-          <div v-if="selectedSymbols.length" class="selection-chips">
-            <button v-for="symbol in selectedSymbols" :key="symbol" class="chip" @click="removeSymbol(symbol)">
-              {{ symbol }}
-              <span class="chip-close">×</span>
-            </button>
-          </div>
-          <p v-else class="muted">全量更新当前市场</p>
-        </div>
-        <div v-if="lastUpdateSummary" class="info-card">
-          <p class="muted">最近更新</p>
-          <div class="result-grid">
-            <div>
-              <p class="muted">更新标的</p>
-              <p class="metric-value">{{ lastUpdateSummary.updated_symbols || 0 }}</p>
-            </div>
-            <div>
-              <p class="muted">写入行数</p>
-              <p class="metric-value">{{ lastUpdateSummary.rows || 0 }}</p>
-            </div>
-            <div>
-              <p class="muted">缺失标的</p>
-              <p class="metric-value">{{ (lastUpdateSummary.missing_symbols || []).length }}</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
 
-    <section class="grid grid-2" v-show="activeTab === 'strategy'">
-      <div class="panel">
-        <header class="panel-title">
-          <div>
-            <h2>历史回测</h2>
-            <p class="muted">执行经典买入突破 + ATR 止损止盈。</p>
-          </div>
-          <span class="pill">Backtest</span>
-        </header>
-        <p class="panel-note">建议回测区间 ≥ 1 年；若无成交请缩短买入周期或扩大回测时间。</p>
-        <div class="form-grid">
-          <div>
-            <label class="label">标的列表</label>
-            <input v-model="backtestForm.symbols" placeholder="sh600036, sz000001" />
-          </div>
-          <div>
-            <label class="label">初始资金</label>
-            <input v-model.number="backtestForm.cash" type="number" min="1000" />
-          </div>
-          <div>
-            <label class="label">买入周期</label>
-            <input v-model.number="backtestForm.buy_xd" type="number" min="1" />
-          </div>
-          <div>
-            <label class="label">止损倍数</label>
-            <input v-model.number="backtestForm.stop_loss_n" type="number" step="0.1" />
-          </div>
-          <div>
-            <label class="label">止盈倍数</label>
-            <input v-model.number="backtestForm.stop_win_n" type="number" step="0.1" />
-          </div>
-          <div>
-            <label class="label">回溯年数</label>
-            <input v-model.number="backtestForm.n_folds" type="number" min="1" />
-          </div>
-          <div>
-            <label class="label">开始日期</label>
-            <input v-model="backtestForm.start" type="date" />
-          </div>
-          <div>
-            <label class="label">结束日期</label>
-            <input v-model="backtestForm.end" type="date" />
-          </div>
-        </div>
-        <div class="toolbar">
-          <button class="btn-primary" @click="runBacktest" :disabled="actionsBusy">启动回测</button>
-          <span class="muted">回测完成后可导出 CSV</span>
-        </div>
-        <div v-if="backtestSummary" class="result-card">
-          <h3>回测摘要</h3>
-          <div class="result-grid">
-            <div>
-              <p class="muted">订单行数</p>
-              <p class="metric-value">{{ backtestSummary.orders_rows }}</p>
-            </div>
-            <div>
-              <p class="muted">行为行数</p>
-              <p class="metric-value">{{ backtestSummary.actions_rows }}</p>
-            </div>
-            <div>
-              <p class="muted">基准</p>
-              <p class="metric-value">{{ backtestSummary.benchmark || '-' }}</p>
-            </div>
-          </div>
-        </div>
-        <div v-if="showBacktestVisual" class="result-card backtest-visual">
-          <h3>回测可视化</h3>
-          <div class="result-grid" v-if="backtestTradeStats">
-            <div>
-              <p class="muted">交易次数</p>
-              <p class="metric-value">{{ backtestTradeStats.total }}</p>
-            </div>
-            <div>
-              <p class="muted">胜率</p>
-              <p class="metric-value">{{ formatNumber(backtestTradeStats.winRate, 1) }}%</p>
-            </div>
-            <div>
-              <p class="muted">总盈利</p>
-              <p class="metric-value">{{ formatNumber(backtestTradeStats.totalProfit, 2) }}</p>
-            </div>
-            <div>
-              <p class="muted">单笔均值</p>
-              <p class="metric-value">{{ formatNumber(backtestTradeStats.avgProfit, 2) }}</p>
-            </div>
-          </div>
-          <p v-else class="muted">暂无交易明细，建议扩大回测区间或调整买入周期。</p>
-          <div class="toolbar">
-            <label class="label">展示标的</label>
-            <select v-model="chartSymbol" class="select">
-              <option v-for="symbol in backtestSymbols" :key="symbol" :value="symbol">
-                {{ symbol }}
-              </option>
-            </select>
-            <label class="label">订单筛选</label>
-            <select v-model="orderFilter" class="select">
-              <option value="all">全部</option>
-              <option value="win">盈利</option>
-              <option value="loss">亏损</option>
-              <option value="hold">持仓</option>
-            </select>
-            <label class="label">选中订单</label>
-            <select v-model="selectedOrderKey" class="select" @change="syncSelectedOrder">
-              <option value="">未选择</option>
-              <option v-for="order in filteredOrders" :key="orderKey(order)" :value="orderKey(order)">
-                {{ order.symbol }} · {{ formatKlineDate(order.buy_date) }} · {{ formatNumber(order.buy_price) }}
-              </option>
-            </select>
-            <label class="label">显示区间</label>
-            <input v-model.number="chartWindow.size" type="range" min="60" max="360" step="20" />
-            <span class="muted">最近 {{ chartWindow.size }} 根</span>
-            <button class="btn-secondary" @click="shiftWindow(1)">更早</button>
-            <button class="btn-secondary" @click="shiftWindow(-1)">更晚</button>
-            <label class="toggle">
-              <input type="checkbox" v-model="showStopLines" />
-              <span>止损/止盈线</span>
-            </label>
-            <button class="btn-secondary" @click="loadKlineChart" :disabled="klineLoading">
-              {{ klineLoading ? '加载中' : '加载K线' }}
-            </button>
-            <span class="muted">上三角为买入，下三角为卖出</span>
-          </div>
-          <p v-if="klineError" class="error">{{ klineError }}</p>
-          <div class="kline-chart" ref="klineContainer">
-            <div v-if="hoverInfo" class="kline-tooltip">
-              <div class="mono">日期 {{ hoverInfo.date }}</div>
-              <div class="mono">开 {{ formatNumber(hoverInfo.open) }}</div>
-              <div class="mono">高 {{ formatNumber(hoverInfo.high) }}</div>
-              <div class="mono">低 {{ formatNumber(hoverInfo.low) }}</div>
-              <div class="mono">收 {{ formatNumber(hoverInfo.close) }}</div>
-              <div class="mono">量 {{ hoverInfo.volume ?? '-' }}</div>
-            </div>
-            <p v-if="klineLoading" class="muted">K线加载中…</p>
-            <p v-else-if="!klineData.length" class="muted">请点击“加载K线”查看图表</p>
-          </div>
-          <p class="muted">收益曲线（累计盈亏）</p>
-          <div class="equity-chart" ref="equityContainer">
-            <p v-if="!equityData.length" class="muted">暂无收益曲线</p>
-          </div>
-          <div v-if="filteredOrders.length" class="result-card">
-            <h3>交易明细</h3>
-            <div class="table-wrap">
-              <table class="table">
-                <thead>
-                  <tr>
-                    <th>Symbol</th>
-                    <th>买入日期</th>
-                    <th>买入价</th>
-                    <th>卖出日期</th>
-                    <th>卖出价</th>
-                    <th>止损价</th>
-                    <th>止盈价</th>
-                    <th>盈亏</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="order in filteredOrders.slice(0, 80)"
-                    :key="orderKey(order)"
-                    :class="{ 'is-selected': orderKey(order) === selectedOrderKey }"
-                    @click="selectOrder(order)"
-                  >
-                    <td class="mono">{{ order.symbol }}</td>
-                    <td class="mono">{{ formatKlineDate(order.buy_date) }}</td>
-                    <td class="mono">{{ formatNumber(order.buy_price) }}</td>
-                    <td class="mono">{{ formatKlineDate(order.sell_date) }}</td>
-                    <td class="mono">{{ formatNumber(order.sell_price) }}</td>
-                    <td class="mono">{{ formatNumber(order.stop_loss_price) }}</td>
-                    <td class="mono">{{ formatNumber(order.stop_win_price) }}</td>
-                    <td class="mono">{{ formatNumber(resolveOrderProfit(order)) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <p class="muted">默认展示前 80 条交易记录，点击行可定位到K线标记。</p>
-          </div>
-        </div>
-      </div>
+    
+    <StrategyPanel
+      :active="activeTab === 'strategy'"
+      :backtest-form="backtestForm"
+      :grid-form="gridForm"
+      :buy-strategies="buyStrategies"
+      :sell-strategies="sellStrategies"
+      :active-buy-strategy="activeBuyStrategy"
+      :active-sell-strategy="activeSellStrategy"
+      :grid-buy-param-lists="gridBuyParamLists"
+      :grid-sell-param-lists="gridSellParamLists"
+      v-model:buy-strategy-id="buyStrategyId"
+      v-model:sell-strategy-id="sellStrategyId"
+      :buy-strategy-params="buyStrategyParams"
+      :sell-strategy-params="sellStrategyParams"
+      :run-backtest="runBacktest"
+      :actions-busy="actionsBusy"
+      :backtest-summary="backtestSummary"
+      :backtest-trade-stats="backtestTradeStats"
+      :backtest-symbols="backtestSymbols"
+      v-model:chart-symbol="chartSymbol"
+      v-model:order-filter="orderFilter"
+      v-model:selected-order-key="selectedOrderKey"
+      v-model:show-stop-lines="showStopLines"
+      :chart-window="chartWindow"
+      :kline-loading="klineLoading"
+      :kline-error="klineError"
+      :hover-info="hoverInfo"
+      :kline-data="klineData"
+      :equity-data="equityData"
+      :filtered-orders="filteredOrders"
+      :paged-orders="pagedOrders"
+      v-model:order-page="orderPage"
+      v-model:order-page-size="orderPageSize"
+      :order-total-pages="orderTotalPages"
+      :order-key="orderKey"
+      :format-number="formatNumber"
+      :format-kline-date="formatKlineDate"
+      :resolve-order-profit="resolveOrderProfit"
+      :select-order="selectOrder"
+      :shift-window="shiftWindow"
+      :load-kline-chart="loadKlineChart"
+      :show-backtest-visual="showBacktestVisual"
+      :run-grid-search="runGridSearch"
+      :grid-summary="gridSummary"
+      :grid-summary-text="gridSummaryText"
+      :apply-grid-to-backtest="applyGridToBacktest"
+      :set-kline-container="setKlineContainer"
+      :set-equity-container="setEquityContainer"
+    />
 
-      <div class="panel">
-        <header class="panel-title">
-          <div>
-            <h2>参数交叉验证</h2>
-            <p class="muted">多参数组合网格寻优。</p>
-          </div>
-          <span class="pill">Grid</span>
-        </header>
-        <p class="panel-note">结果里的最佳参数可一键回填到回测；寻优范围越大运行越久。</p>
-        <div class="form-grid">
-          <div>
-            <label class="label">标的列表</label>
-            <input v-model="gridForm.symbols" placeholder="sh600036, sz000001" />
-          </div>
-          <div>
-            <label class="label">初始资金</label>
-            <input v-model.number="gridForm.cash" type="number" min="1000" />
-          </div>
-          <div>
-            <label class="label">开始日期</label>
-            <input v-model="gridForm.start" type="date" />
-          </div>
-          <div>
-            <label class="label">结束日期</label>
-            <input v-model="gridForm.end" type="date" />
-          </div>
-          <div>
-            <label class="label">买入周期列表</label>
-            <input v-model="gridForm.buy_xd_list" placeholder="20, 42, 60" />
-          </div>
-          <div>
-            <label class="label">止损倍数列表</label>
-            <input v-model="gridForm.stop_loss_n_list" placeholder="0.5, 1.0" />
-          </div>
-          <div>
-            <label class="label">止盈倍数列表</label>
-            <input v-model="gridForm.stop_win_n_list" placeholder="2.0, 3.0" />
-          </div>
-          <div>
-            <label class="label">最大运行次数</label>
-            <input v-model.number="gridForm.max_runs" type="number" min="1" />
-          </div>
-          <div>
-            <label class="label">回溯年数</label>
-            <input v-model.number="gridForm.n_folds" type="number" min="1" />
-          </div>
-        </div>
-        <div class="toolbar">
-          <button class="btn-secondary" @click="runGridSearch" :disabled="actionsBusy">启动寻优</button>
-          <span class="muted">输出最佳参数组合</span>
-        </div>
-        <div v-if="gridSummary" class="result-card">
-          <h3>最佳组合</h3>
-          <div class="toolbar">
-            <button class="btn-secondary" @click="applyGridToBacktest">应用到回测参数</button>
-            <span class="muted">自动填充买入周期/止损/止盈</span>
-          </div>
-          <pre class="code">{{ gridSummaryText }}</pre>
-        </div>
-      </div>
-    </section>
 
-    <section class="panel" v-show="activeTab === 'tools'">
-      <header class="panel-title">
-        <div>
-          <h2>量化分析工具</h2>
-          <p class="muted">阻力位、跳空、相关性与涨跌幅分析。</p>
-        </div>
-        <span class="pill">Tools</span>
-      </header>
-      <p class="panel-note">工具结果用于解释回测结论：趋势线判断支撑/阻力，相关性用于组合分散，跳空用于风险提示。</p>
-      <div class="tool-layout">
-        <div class="tool-form">
-          <div class="form-grid">
-            <div>
-              <label class="label">工具类型</label>
-              <select v-model="toolForm.tool" class="select">
-                <option value="support_resistance">阻力/支撑位分析</option>
-                <option value="jump_gap">跳空缺口分析</option>
-                <option value="trend_speed">趋势敏感速度对比</option>
-                <option value="shift_distance">位移路线比分析</option>
-                <option value="regress">线性拟合分析</option>
-                <option value="price_channel">价格通道分析</option>
-                <option value="golden_ratio">黄金分割分析</option>
-                <option value="correlation">相关性分析</option>
-                <option value="distance">距离矩阵分析</option>
-                <option value="p_change_stats">涨跌幅统计</option>
-                <option value="date_week_wave">交易日波动分析</option>
-                <option value="date_week_win">交易日涨跌概率</option>
-                <option value="bcut_change_vc">涨跌区间分析(固定)</option>
-                <option value="qcut_change_vc">涨跌区间分析(分位)</option>
-                <option value="wave_change_rate">波动套利指标</option>
-              </select>
-            </div>
-            <div>
-              <label class="label">标的列表</label>
-              <input v-model="toolForm.symbols" placeholder="sh600036, sz000001" />
-            </div>
-            <div>
-              <label class="label">回溯年数</label>
-              <input v-model.number="toolForm.n_folds" type="number" min="1" />
-            </div>
-            <div>
-              <label class="label">返回行数</label>
-              <input v-model.number="toolForm.limit" type="number" min="50" />
-            </div>
-            <div>
-              <label class="label">开始日期</label>
-              <input v-model="toolForm.start" type="date" />
-            </div>
-            <div>
-              <label class="label">结束日期</label>
-              <input v-model="toolForm.end" type="date" />
-            </div>
-          </div>
+    
+    <AnalysisPanel
+      :active="activeTab === 'tools'"
+      :tool-form="toolForm"
+      :tool-options="toolOptions"
+      :tool-option-mode="toolOptionMode"
+      :analysis-result="analysisResult"
+      :analysis-text="analysisText"
+      :analysis-overlay-enabled="analysisOverlayEnabled"
+      :set-analysis-overlay-enabled="setAnalysisOverlayEnabled"
+      :run-tool="runTool"
+      :sync-analysis-to-chart="syncAnalysisToChart"
+      :actions-busy="actionsBusy"
+    />
 
-          <div class="tool-options" v-if="toolOptionMode === 'support'">
-            <label class="label">趋势线范围</label>
-            <select v-model="toolOptions.only_last" class="select">
-              <option :value="true">仅最近趋势线</option>
-              <option :value="false">全部趋势线</option>
-            </select>
-          </div>
 
-          <div class="tool-options" v-if="toolOptionMode === 'jump'">
-            <label class="label">跳空模式</label>
-            <select v-model="toolOptions.mode" class="select">
-              <option value="stats">统计模式</option>
-              <option value="gap">缺口筛选</option>
-              <option value="weighted">缺口加权筛选</option>
-            </select>
-            <div class="form-grid">
-              <div>
-                <label class="label">能量阈值</label>
-                <input v-model.number="toolOptions.power_threshold" type="number" step="0.1" />
-              </div>
-              <div>
-                <label class="label">跳空阈值因子</label>
-                <input v-model.number="toolOptions.jump_diff_factor" type="number" step="0.1" />
-              </div>
-              <div>
-                <label class="label">权重 A</label>
-                <input v-model.number="toolOptions.weight_a" type="number" step="0.1" />
-              </div>
-              <div>
-                <label class="label">权重 B</label>
-                <input v-model.number="toolOptions.weight_b" type="number" step="0.1" />
-              </div>
-            </div>
-          </div>
+    <JobsPanel
+      :active="activeTab === 'jobs'"
+      :store="store"
+      :format-time="formatTime"
+      :brief="brief"
+      :export-url="exportUrl"
+      :select-job="selectJob"
+      :remove-job="removeJob"
+      :active-params-text="activeParamsText"
+      :active-result-text="activeResultText"
+      :active-error-text="activeErrorText"
+    />
 
-          <div class="tool-options" v-if="toolOptionMode === 'trend'">
-            <div class="form-grid">
-              <div>
-                <label class="label">对比标的</label>
-                <input v-model="toolOptions.benchmark" placeholder="usSPY / sh000001" />
-              </div>
-              <div>
-                <label class="label">重采样周期</label>
-                <input v-model.number="toolOptions.resample" type="number" min="1" />
-              </div>
-              <div>
-                <label class="label">对比字段</label>
-                <select v-model="toolOptions.speed_key" class="select">
-                  <option value="close">close</option>
-                  <option value="high">high</option>
-                  <option value="low">low</option>
-                  <option value="p_change">p_change</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div class="tool-options" v-if="toolOptionMode === 'shift'">
-            <div class="form-grid">
-              <div>
-                <label class="label">步长</label>
-                <input v-model.number="toolOptions.step_x" type="number" step="0.1" />
-              </div>
-              <div>
-                <label class="label">位移模式</label>
-                <select v-model="toolOptions.shift_mode" class="select">
-                  <option value="close">close</option>
-                  <option value="maxmin">max/min</option>
-                  <option value="summaxmin">sum+max/min</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div class="tool-options" v-if="toolOptionMode === 'regress'">
-            <label class="label">回归模式</label>
-            <select v-model="toolOptions.regress_mode" class="select">
-              <option value="best">最优拟合</option>
-              <option value="least">最少拟合</option>
-              <option value="channel">通道拟合</option>
-            </select>
-          </div>
-
-          <div class="tool-options" v-if="toolOptionMode === 'corr'">
-            <div class="form-grid">
-              <div>
-                <label class="label">相关系数</label>
-                <select v-model="toolOptions.corr_type" class="select">
-                  <option value="pears">pears</option>
-                  <option value="sperm">sperm</option>
-                  <option value="sign">sign</option>
-                  <option value="rolling">rolling</option>
-                </select>
-              </div>
-              <div>
-                <label class="label">字段</label>
-                <select v-model="toolOptions.field" class="select">
-                  <option value="p_change">p_change</option>
-                  <option value="close">close</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div class="tool-options" v-if="toolOptionMode === 'distance'">
-            <div class="form-grid">
-              <div>
-                <label class="label">距离类型</label>
-                <select v-model="toolOptions.distance_type" class="select">
-                  <option value="manhattan">manhattan</option>
-                  <option value="euclidean">euclidean</option>
-                  <option value="cosine">cosine</option>
-                </select>
-              </div>
-              <div>
-                <label class="label">字段</label>
-                <select v-model="toolOptions.field" class="select">
-                  <option value="p_change">p_change</option>
-                  <option value="close">close</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <div class="toolbar">
-            <button class="btn-primary" @click="runTool" :disabled="actionsBusy">执行分析</button>
-            <span class="muted">执行后查看任务详情</span>
-          </div>
-        </div>
-
-        <div class="tool-result">
-          <h3>分析结果预览</h3>
-          <div v-if="analysisResult" class="code-wrap">
-            <pre class="code">{{ analysisText }}</pre>
-          </div>
-          <div v-if="analysisResult" class="info-card">
-            <div class="toolbar">
-              <button class="btn-secondary" @click="syncAnalysisToChart">同步到回测K线</button>
-              <label class="toggle">
-                <input type="checkbox" v-model="analysisOverlayEnabled" />
-                <span>叠加趋势线</span>
-              </label>
-            </div>
-            <p class="muted">分析标的：{{ analysisResult.symbol || '-' }}</p>
-            <p class="muted" v-if="analysisResult.trend_lines?.length">
-              支撑/阻力线：{{ analysisResult.trend_lines.length }} 条
-            </p>
-            <p class="muted">切换到“策略验证”查看图表叠加效果。</p>
-          </div>
-          <p v-else class="muted">暂无分析结果。</p>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel" v-show="activeTab === 'jobs'">
-      <header class="panel-title">
-        <div>
-          <h2>任务队列</h2>
-          <p class="muted">回测、更新与分析任务统一管理。</p>
-        </div>
-        <div v-if="store.activeJob" class="pill">
-          当前任务 #{{ store.activeJob.id }} · {{ store.activeJob.type }} ·
-          <span :class="['status', `status-${store.activeJob.status}`]">{{ store.activeJob.status }}</span>
-        </div>
-      </header>
-      <p class="panel-note">成功任务可导出 JSON/CSV，用于后续复盘或策略记录。</p>
-
-      <p v-if="store.jobsError" class="error">{{ store.jobsError }}</p>
-      <div v-if="store.jobsLoading" class="muted">加载中…</div>
-      <div v-else class="table-wrap">
-        <table class="table">
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Type</th>
-              <th>Status</th>
-              <th>Created</th>
-              <th>Updated</th>
-              <th>Result</th>
-              <th>Error</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="job in store.jobs" :key="job.id">
-              <td class="mono">#{{ job.id }}</td>
-              <td>{{ job.type }}</td>
-              <td><span :class="['status', `status-${job.status}`]">{{ job.status }}</span></td>
-              <td class="mono">{{ formatTime(job.created_at) }}</td>
-              <td class="mono">{{ formatTime(job.updated_at) }}</td>
-              <td class="mono">{{ brief(job.result) }}</td>
-              <td class="mono">{{ brief(job.error) }}</td>
-              <td>
-                <div class="table-actions">
-                  <a v-if="job.status === 'succeeded'" class="btn-ghost" :href="exportUrl(job.id, 'json')" target="_blank" rel="noreferrer">
-                    导出 JSON
-                  </a>
-                  <a v-if="job.status === 'succeeded' && job.result?.orders" class="btn-ghost" :href="exportUrl(job.id, 'csv', 'orders')">
-                    订单 CSV
-                  </a>
-                  <a v-if="job.status === 'succeeded' && job.result?.actions" class="btn-ghost" :href="exportUrl(job.id, 'csv', 'actions')">
-                    行为 CSV
-                  </a>
-                  <button class="btn-secondary" @click="selectJob(job.id)">详情</button>
-                  <button class="btn-secondary" @click="removeJob(job)" :disabled="job.status === 'running'">删除</button>
-                </div>
-              </td>
-            </tr>
-            <tr v-if="store.jobs.length === 0">
-              <td colspan="8" class="muted">暂无任务</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div v-if="store.activeJob" class="result-card">
-        <h3>任务详情</h3>
-        <div class="result-grid">
-          <div>
-            <p class="muted">任务编号</p>
-            <p class="metric-value">#{{ store.activeJob.id }}</p>
-          </div>
-          <div>
-            <p class="muted">任务类型</p>
-            <p class="metric-value">{{ store.activeJob.type }}</p>
-          </div>
-          <div>
-            <p class="muted">状态</p>
-            <p class="metric-value">{{ store.activeJob.status }}</p>
-          </div>
-          <div>
-            <p class="muted">更新时间</p>
-            <p class="metric-value">{{ formatTime(store.activeJob.updated_at) }}</p>
-          </div>
-        </div>
-        <div class="code-wrap" v-if="store.activeJob.params">
-          <p class="muted">参数</p>
-          <pre class="code">{{ activeParamsText }}</pre>
-        </div>
-        <div class="code-wrap" v-if="store.activeJob.result">
-          <p class="muted">结果</p>
-          <pre class="code">{{ activeResultText }}</pre>
-        </div>
-        <div class="code-wrap" v-if="store.activeJob.error">
-          <p class="muted">错误</p>
-          <pre class="code">{{ activeErrorText }}</pre>
-        </div>
-      </div>
-    </section>
   </div>
 </template>
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { createChart } from 'lightweight-charts'
+import PreparePanel from './quant/PreparePanel.vue'
+import StrategyPanel from './quant/StrategyPanel.vue'
+import AnalysisPanel from './quant/AnalysisPanel.vue'
+import JobsPanel from './quant/JobsPanel.vue'
 import { api } from '../services/api'
 import { useQuantStore } from '../stores/quantStore'
 
@@ -874,6 +262,18 @@ const selectedOrderKey = ref('')
 const selectedOrder = ref(null)
 const showStopLines = ref(true)
 const analysisOverlayEnabled = ref(true)
+const orderPage = ref(1)
+const orderPageSize = ref(20)
+const setKlineContainer = (el) => {
+  klineContainer.value = el
+}
+const setEquityContainer = (el) => {
+  equityContainer.value = el
+}
+
+const setAnalysisOverlayEnabled = (value) => {
+  analysisOverlayEnabled.value = value
+}
 
 const updateForm = reactive({
   market: market.value,
@@ -896,6 +296,13 @@ const backtestForm = reactive({
   start: '',
   end: ''
 })
+
+const buyStrategyId = ref('breakout')
+const sellStrategyId = ref('atr_stop')
+const buyStrategyParams = reactive({})
+const sellStrategyParams = reactive({})
+const gridBuyParamLists = reactive({})
+const gridSellParamLists = reactive({})
 
 const gridForm = reactive({
   market: market.value,
@@ -942,6 +349,15 @@ const actionsBusy = computed(
   () => store.jobsLoading || store.activeJobLoading || store.symbolsLoading
 )
 
+const buyStrategies = computed(() => store.strategies?.buy || [])
+const sellStrategies = computed(() => store.strategies?.sell || [])
+const activeBuyStrategy = computed(() =>
+  buyStrategies.value.find((item) => item.id === buyStrategyId.value) || null
+)
+const activeSellStrategy = computed(() =>
+  sellStrategies.value.find((item) => item.id === sellStrategyId.value) || null
+)
+
 const defaultSymbolForMarket = (value) => {
   if (value === 'SH') return 'sh600036'
   if (value === 'SZ') return 'sz000001'
@@ -964,6 +380,53 @@ watch(market, (val) => {
   if (!gridForm.symbols) gridForm.symbols = defaultSymbolForMarket(val)
   if (!toolForm.symbols) toolForm.symbols = defaultSymbolForMarket(val)
 })
+
+watch(buyStrategies, (list) => {
+  if (!list.length) return
+  if (!list.find((item) => item.id === buyStrategyId.value)) {
+    buyStrategyId.value = list[0].id
+  }
+  applyStrategyDefaults(activeBuyStrategy.value, buyStrategyParams)
+  applyGridDefaults(activeBuyStrategy.value, gridBuyParamLists)
+})
+
+watch(sellStrategies, (list) => {
+  if (!list.length) return
+  if (!list.find((item) => item.id === sellStrategyId.value)) {
+    sellStrategyId.value = list[0].id
+  }
+  applyStrategyDefaults(activeSellStrategy.value, sellStrategyParams)
+  applyGridDefaults(activeSellStrategy.value, gridSellParamLists)
+})
+
+watch(buyStrategyId, () => {
+  resetStrategyParams(activeBuyStrategy.value, buyStrategyParams)
+  resetGridParamLists(activeBuyStrategy.value, gridBuyParamLists)
+})
+
+watch(sellStrategyId, () => {
+  resetStrategyParams(activeSellStrategy.value, sellStrategyParams)
+  resetGridParamLists(activeSellStrategy.value, gridSellParamLists)
+})
+
+watch(
+  () => backtestForm.buy_xd,
+  (val) => {
+    if (['breakout', 'momentum_break', 'put_break', 'put_xdbk'].includes(buyStrategyId.value)) {
+      buyStrategyParams.xd = val
+    }
+  }
+)
+
+watch(
+  () => [backtestForm.stop_loss_n, backtestForm.stop_win_n],
+  ([loss, win]) => {
+    if (['atr_stop', 'atr_close', 'atr_pre'].includes(sellStrategyId.value)) {
+      sellStrategyParams.stop_loss_n = loss
+      sellStrategyParams.stop_win_n = win
+    }
+  }
+)
 
 const jobStats = computed(() => {
   const stats = { total: 0, running: 0, succeeded: 0, failed: 0 }
@@ -1011,6 +474,20 @@ const filteredOrders = computed(() => {
     })
   }
   return scoped
+})
+
+const orderTotalPages = computed(() => {
+  const total = filteredOrders.value.length
+  return Math.max(1, Math.ceil(total / orderPageSize.value))
+})
+
+const pagedOrders = computed(() => {
+  const total = filteredOrders.value.length
+  if (!total) return []
+  const page = Math.min(orderPage.value, orderTotalPages.value)
+  const start = (page - 1) * orderPageSize.value
+  const end = start + orderPageSize.value
+  return filteredOrders.value.slice(start, end)
 })
 
 const backtestSymbols = computed(() => {
@@ -1075,8 +552,32 @@ const analysisText = computed(() =>
   analysisResult.value ? JSON.stringify(analysisResult.value, null, 2) : ''
 )
 
-const applyGridToBacktest = () => {
+const applyGridToBacktest = async () => {
   if (!gridSummary.value) return
+  if (gridSummary.value.buy_strategy) {
+    buyStrategyId.value = gridSummary.value.buy_strategy
+  }
+  if (gridSummary.value.sell_strategy) {
+    sellStrategyId.value = gridSummary.value.sell_strategy
+  }
+  await nextTick()
+  if (gridSummary.value.buy_params) {
+    resetStrategyParams(activeBuyStrategy.value, buyStrategyParams)
+    Object.assign(buyStrategyParams, gridSummary.value.buy_params)
+    if (gridSummary.value.buy_params.xd !== undefined) {
+      backtestForm.buy_xd = Number(gridSummary.value.buy_params.xd) || backtestForm.buy_xd
+    }
+  }
+  if (gridSummary.value.sell_params) {
+    resetStrategyParams(activeSellStrategy.value, sellStrategyParams)
+    Object.assign(sellStrategyParams, gridSummary.value.sell_params)
+    if (gridSummary.value.sell_params.stop_loss_n !== undefined) {
+      backtestForm.stop_loss_n = Number(gridSummary.value.sell_params.stop_loss_n)
+    }
+    if (gridSummary.value.sell_params.stop_win_n !== undefined) {
+      backtestForm.stop_win_n = Number(gridSummary.value.sell_params.stop_win_n)
+    }
+  }
   if (gridSummary.value.buy_xd) backtestForm.buy_xd = gridSummary.value.buy_xd
   if (gridSummary.value.stop_loss_n !== undefined) backtestForm.stop_loss_n = gridSummary.value.stop_loss_n
   if (gridSummary.value.stop_win_n !== undefined) backtestForm.stop_win_n = gridSummary.value.stop_win_n
@@ -1096,6 +597,9 @@ watch(backtestSummary, (val) => {
   if (chartSymbol.value) {
     loadKlineChart()
   }
+  nextTick(() => {
+    updateEquityChart()
+  })
 })
 
 watch(chartSymbol, (val, oldVal) => {
@@ -1111,9 +615,18 @@ watch(
 )
 
 watch(filteredOrders, () => {
+  orderPage.value = 1
   syncSelectedOrder()
   if (klineData.value.length) updateChartData()
   updateEquityChart()
+})
+
+watch(selectedOrderKey, () => {
+  syncSelectedOrder()
+})
+
+watch(orderPageSize, () => {
+  orderPage.value = 1
 })
 
 watch(selectedOrder, () => {
@@ -1179,6 +692,52 @@ const formatNumber = (value, digits = 2) => {
   const num = Number(value)
   if (!Number.isFinite(num)) return '-'
   return num.toFixed(digits)
+}
+
+const applyStrategyDefaults = (strategy, target) => {
+  if (!strategy || !Array.isArray(strategy.params)) return
+  strategy.params.forEach((param) => {
+    if (target[param.key] === undefined) {
+      target[param.key] = param.default
+    }
+  })
+}
+
+const resetStrategyParams = (strategy, target) => {
+  Object.keys(target).forEach((key) => {
+    delete target[key]
+  })
+  if (!strategy || !Array.isArray(strategy.params)) return
+  strategy.params.forEach((param) => {
+    target[param.key] = param.default
+  })
+}
+
+const gridFallbackValue = (param) => {
+  if (param.key === 'xd' && gridForm.buy_xd_list) return String(gridForm.buy_xd_list)
+  if (param.key === 'stop_loss_n' && gridForm.stop_loss_n_list) return String(gridForm.stop_loss_n_list)
+  if (param.key === 'stop_win_n' && gridForm.stop_win_n_list) return String(gridForm.stop_win_n_list)
+  if (param.default === undefined || param.default === null) return ''
+  return String(param.default)
+}
+
+const applyGridDefaults = (strategy, target) => {
+  if (!strategy || !Array.isArray(strategy.params)) return
+  strategy.params.forEach((param) => {
+    if (target[param.key] === undefined) {
+      target[param.key] = gridFallbackValue(param)
+    }
+  })
+}
+
+const resetGridParamLists = (strategy, target) => {
+  Object.keys(target).forEach((key) => {
+    delete target[key]
+  })
+  if (!strategy || !Array.isArray(strategy.params)) return
+  strategy.params.forEach((param) => {
+    target[param.key] = gridFallbackValue(param)
+  })
 }
 
 const toDateInt = (value) => {
@@ -1655,11 +1214,50 @@ const loadKlineChart = async () => {
   }
 }
 
+const parseStringList = (raw) =>
+  String(raw)
+    .split(/[\s,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+
 const parseNumberList = (raw) =>
   String(raw)
     .split(/[\s,;]+/)
     .map((item) => Number(item))
     .filter((item) => Number.isFinite(item))
+
+const parseBooleanList = (raw) =>
+  parseStringList(raw).map((item) => {
+    const value = item.toLowerCase()
+    return ['true', '1', 'yes', 'y'].includes(value)
+  })
+
+const buildGridParamPayload = (strategy, source) => {
+  if (!strategy || !Array.isArray(strategy.params)) return {}
+  const payload = {}
+  strategy.params.forEach((param) => {
+    const raw = source[param.key]
+    if (raw === undefined || raw === null || String(raw).trim() === '') return
+    if (param.type === 'bool') {
+      const list = parseBooleanList(raw)
+      if (list.length) payload[param.key] = list
+      return
+    }
+    if (param.type === 'int') {
+      const list = parseNumberList(raw).map((item) => Math.round(item))
+      if (list.length) payload[param.key] = list
+      return
+    }
+    if (param.type === 'float') {
+      const list = parseNumberList(raw)
+      if (list.length) payload[param.key] = list
+      return
+    }
+    const list = parseStringList(raw)
+    if (list.length) payload[param.key] = list
+  })
+  return payload
+}
 
 const search = async () => {
   await store.searchSymbols({
@@ -1877,12 +1475,18 @@ const runBacktest = async () => {
     cash: backtestForm.cash,
     buy_xd: backtestForm.buy_xd,
     stop_loss_n: backtestForm.stop_loss_n,
-    stop_win_n: backtestForm.stop_win_n
+    stop_win_n: backtestForm.stop_win_n,
+    buy_strategy: buyStrategyId.value,
+    buy_params: { ...buyStrategyParams },
+    sell_strategy: sellStrategyId.value,
+    sell_params: { ...sellStrategyParams }
   })
   await store.fetchJob(job.id)
 }
 
 const runGridSearch = async () => {
+  const buyGrid = buildGridParamPayload(activeBuyStrategy.value, gridBuyParamLists)
+  const sellGrid = buildGridParamPayload(activeSellStrategy.value, gridSellParamLists)
   const job = await store.startGridSearch({
     market: gridForm.market,
     symbols: gridForm.symbols,
@@ -1890,9 +1494,10 @@ const runGridSearch = async () => {
     start: gridForm.start || undefined,
     end: gridForm.end || undefined,
     cash: gridForm.cash,
-    buy_xd_list: parseNumberList(gridForm.buy_xd_list).map((n) => Math.round(n)),
-    stop_loss_n_list: parseNumberList(gridForm.stop_loss_n_list),
-    stop_win_n_list: parseNumberList(gridForm.stop_win_n_list),
+    buy_strategy: buyStrategyId.value,
+    sell_strategy: sellStrategyId.value,
+    buy_params_grid: buyGrid,
+    sell_params_grid: sellGrid,
     max_runs: gridForm.max_runs
   })
   await store.fetchJob(job.id)
@@ -1945,6 +1550,8 @@ const runTool = async () => {
 }
 
 const handleResize = () => {
+  ensureChart()
+  ensureEquityChart()
   if (chartRef.value && klineContainer.value) {
     chartRef.value.applyOptions({ width: klineContainer.value.clientWidth })
   }
@@ -1960,6 +1567,7 @@ onMounted(async () => {
   window.addEventListener('resize', handleResize)
   await Promise.all([
     store.fetchJobs(),
+    store.fetchStrategies(),
     store.searchSymbols({
       market: market.value,
       q: query.value,

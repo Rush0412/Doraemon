@@ -2,6 +2,11 @@ from pathlib import Path
 import sys
 import logging
 
+repo_root = Path(__file__).resolve().parents[2]
+repo_root_str = str(repo_root)
+if repo_root_str not in sys.path:
+    sys.path.insert(0, repo_root_str)
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,11 +24,6 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("doraemon")
-
-repo_root = Path(__file__).resolve().parents[2]
-repo_root_str = str(repo_root)
-if repo_root_str not in sys.path:
-    sys.path.insert(0, repo_root_str)
 
 Base.metadata.create_all(bind=engine)
 

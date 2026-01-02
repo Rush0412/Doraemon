@@ -274,8 +274,9 @@ class AbuCapital(PickleStateMixin):
             keep_cnt = 0
             if has_cond1 and has_cond2:
                 # 前提1 + 前提2->本就有持仓, 拿到之前的持仓量
-                keep_cnt = self.capital_pd[a_order.buy_symbol
-                                           + buy_type_keep].iloc[:num_index + 1].dropna()[-1]
+                keep_series = self.capital_pd[a_order.buy_symbol + buy_type_keep].iloc[:num_index + 1].dropna()
+                if not keep_series.empty:
+                    keep_cnt = keep_series.iloc[-1]
 
             keep_cnt += a_order.buy_cnt
 
@@ -319,7 +320,10 @@ class AbuCapital(PickleStateMixin):
 
         if has_cond1 and has_cond2:
             # 有持仓, 拿到之前的持仓量
-            keep_cnt = self.capital_pd[a_order.buy_symbol + buy_type_keep].iloc[:num_index + 1].dropna()[-1]
+            keep_series = self.capital_pd[a_order.buy_symbol + buy_type_keep].iloc[:num_index + 1].dropna()
+            if keep_series.empty:
+                return False
+            keep_cnt = keep_series.iloc[-1]
             sell_cnt = a_order.buy_cnt
 
             if keep_cnt < sell_cnt:
