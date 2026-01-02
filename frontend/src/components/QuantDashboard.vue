@@ -4,7 +4,7 @@
       <div class="hero-head">
         <div>
           <p class="eyebrow">Doraemon Quant Suite</p>
-          <h1>阿布量化控制台</h1>
+          <h1>量化控制台</h1>
           <p class="hero-sub">
             数据更新、回测、参数寻优与量化分析一体化视图。
           </p>
@@ -504,9 +504,10 @@ const backtestSymbols = computed(() => {
 
 const backtestTradeStats = computed(() => {
   const orders = backtestOrders.value || []
-  if (!orders.length) return null
-  const profits = orders.map((item) => resolveOrderProfit(item))
-  const total = orders.length
+  const closedOrders = orders.filter((item) => isClosedOrder(item))
+  if (!closedOrders.length) return null
+  const profits = closedOrders.map((item) => Number(resolveOrderProfit(item) || 0))
+  const total = closedOrders.length
   const wins = profits.filter((p) => p > 0).length
   const totalProfit = profits.reduce((sum, val) => sum + val, 0)
   const avgProfit = total ? totalProfit / total : 0
@@ -535,8 +536,11 @@ const chartWindow = reactive({
 const hoverInfo = ref(null)
 
 const gridSummary = computed(() => {
-  if (!store.activeJob || store.activeJob.type !== 'grid_search') return null
-  return store.activeJob.result?.best || null
+  const job =
+    store.activeJob && store.activeJob.type === 'grid_search'
+      ? store.activeJob
+      : latestJobByType('grid_search')
+  return job?.result?.best || null
 })
 
 const analysisResult = computed(() => {
@@ -775,6 +779,13 @@ const orderKey = (order) => {
   return `${order.symbol || 'unknown'}-${dateInt}-${price}`
 }
 
+const isClosedOrder = (order) => {
+  if (!order) return false
+  const sellDate = Number(order.sell_date || 0)
+  const sellPrice = Number(order.sell_price)
+  return sellDate > 0 && Number.isFinite(sellPrice) && sellPrice > 0
+}
+
 const focusOrder = (order) => {
   if (!order || !klineData.value.length) return
   const dateInt = toDateInt(order.buy_date)
@@ -790,13 +801,18 @@ const focusOrder = (order) => {
 
 const resolveOrderProfit = (order) => {
   if (!order) return 0
+  if (!isClosedOrder(order)) return null
   if (order.profit !== undefined && order.profit !== null) {
     const val = Number(order.profit)
     if (Number.isFinite(val)) return val
   }
   const buy = Number(order.buy_price)
   const sell = Number(order.sell_price)
-  if (Number.isFinite(buy) && Number.isFinite(sell)) return sell - buy
+  const cnt = Number(order.buy_cnt)
+  const direction = Number(order.expect_direction || 1)
+  const size = Number.isFinite(cnt) && cnt > 0 ? cnt : 1
+  const dir = Number.isFinite(direction) ? direction : 1
+  if (Number.isFinite(buy) && Number.isFinite(sell)) return (sell - buy) * size * dir
   return 0
 }
 
@@ -1060,10 +1076,18 @@ const applyAnalysisOverlay = () => {
   const symbol = (analysisResult.value.symbol || '').toLowerCase()
   if (symbol && chartSymbol.value && symbol !== chartSymbol.value.toLowerCase()) return
   lines.forEach((line) => {
-    const startIdx = Math.max(0, Math.min(klineData.value.length - 1, Math.round(Number(line.x_start) || 0)))
-    const endIdx = Math.max(0, Math.min(klineData.value.length - 1, Math.round(Number(line.x_end) || 0)))
-    const startTime = toChartTime(klineData.value[startIdx]?.date)
-    const endTime = toChartTime(klineData.value[endIdx]?.date)
+    let startTime = toChartTime(line.x_start)
+    let endTime = toChartTime(line.x_end)
+    if (!startTime || !endTime) {
+      const startIndexValue =
+        Number.isFinite(Number(line.x_start_idx)) ? Number(line.x_start_idx) : Number(line.x_start)
+      const endIndexValue =
+        Number.isFinite(Number(line.x_end_idx)) ? Number(line.x_end_idx) : Number(line.x_end)
+      const startIdx = Math.max(0, Math.min(klineData.value.length - 1, Math.round(startIndexValue || 0)))
+      const endIdx = Math.max(0, Math.min(klineData.value.length - 1, Math.round(endIndexValue || 0)))
+      startTime = toChartTime(klineData.value[startIdx]?.date)
+      endTime = toChartTime(klineData.value[endIdx]?.date)
+    }
     if (!startTime || !endTime) return
     const color = line.type === 'support' ? '#2f6fdd' : '#c17f2f'
     const series = chartRef.value.addLineSeries({
@@ -1147,7 +1171,7 @@ const buildEquitySeries = () => {
       const time = toChartTime(order.sell_date || order.buy_date)
       return {
         time,
-        profit: resolveOrderProfit(order)
+        profit: Number(resolveOrderProfit(order) || 0)
       }
     })
     .filter((row) => row.time)

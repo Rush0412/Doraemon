@@ -357,6 +357,33 @@ def _build_param_grid(defaults: dict, grid: dict) -> list[dict]:
     return combos
 
 
+def _summarize_orders(orders_pd):
+    if orders_pd is None or getattr(orders_pd, "empty", True):
+        return {
+            "closed_orders": 0,
+            "open_orders": 0,
+            "profit_sum": 0.0,
+            "profit_mean": 0.0,
+            "win_rate": 0.0,
+        }
+    import pandas as pd
+
+    closed = orders_pd[orders_pd["sell_type"].isin(["win", "loss"])]
+    closed_count = int(getattr(closed, "shape", [0])[0])
+    open_count = int(getattr(orders_pd, "shape", [0])[0]) - closed_count
+    profit_series = pd.to_numeric(closed.get("profit"), errors="coerce").fillna(0)
+    profit_sum = float(profit_series.sum()) if closed_count else 0.0
+    profit_mean = float(profit_series.mean()) if closed_count else 0.0
+    win_rate = float((closed["result"] == 1).mean() * 100) if closed_count else 0.0
+    return {
+        "closed_orders": closed_count,
+        "open_orders": max(0, open_count),
+        "profit_sum": profit_sum,
+        "profit_mean": profit_mean,
+        "win_rate": win_rate,
+    }
+
+
 def _build_buy_factors(params: dict) -> list[dict]:
     from abupy.FactorBuyBu import AbuFactorBuyBreak
     from abupy.FactorBuyBu.ABuFactorBuyBreak import (
@@ -1052,6 +1079,156 @@ def _build_symbol_rows(market: str) -> list[dict]:
     return rows
 
 
+def _extract_cn_symbol_code(query: Optional[str]) -> Optional[str]:
+    if not query:
+        return None
+    raw = str(query).strip()
+    if not raw:
+        return None
+    lower = raw.lower()
+    if lower.startswith(("sh", "sz")):
+        code = lower[2:]
+    else:
+        code = raw
+    code = code.strip()
+    if not code.isdigit():
+        return None
+    if len(code) < 6:
+        code = code.zfill(6)
+    return code
+
+
+def _select_akshare_row(df, code: str, code_index: int):
+    try:
+        series = df.iloc[:, code_index].astype(str)
+        matches = df[series == code]
+        if matches.empty:
+            return None
+        return matches.iloc[0]
+    except Exception:
+        return None
+
+
+def _akshare_symbol_row(code: str) -> Optional[dict]:
+    try:
+        import akshare as ak
+    except Exception:
+        return None
+    if not code or not code.isdigit():
+        return None
+    if len(code) < 6:
+        code = code.zfill(6)
+    if code.startswith(("6", "9")):
+        df = ak.stock_info_sh_name_code()
+        row = _select_akshare_row(df, code, 0)
+        if row is None:
+            return None
+        name = row.iloc[1] if len(row) > 1 else None
+        if isinstance(name, str):
+            name = name.strip() or None
+        return {
+            "market": "SH",
+            "symbol": f"sh{code}",
+            "name": name,
+            "exchange": "SH",
+            "industry": None,
+        }
+    df = ak.stock_info_sz_name_code()
+    row = _select_akshare_row(df, code, 1)
+    if row is None:
+        return None
+    name = row.iloc[2] if len(row) > 2 else None
+    industry = row.iloc[6] if len(row) > 6 else None
+    if isinstance(name, str):
+        name = name.strip() or None
+    if isinstance(industry, str):
+        industry = industry.strip() or None
+    market_value = "300" if code.startswith("3") else "SZ"
+    return {
+        "market": market_value,
+        "symbol": f"sz{code}",
+        "name": name,
+        "exchange": "SZ",
+        "industry": industry,
+    }
+
+
+def _ensure_symbol_from_akshare(db: Session, market: str, query: Optional[str]) -> int:
+    code = _extract_cn_symbol_code(query)
+    if not code:
+        return 0
+    row = _akshare_symbol_row(code)
+    if not row:
+        return 0
+    market_keys = _market_scope(market)
+    if market_keys and row.get("market") not in market_keys:
+        return 0
+    return crud.upsert_stock_symbols(db, [row])
+
+
+def _coerce_symbol_items(raw):
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        return _split_symbols(raw)
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, (list, tuple, set)):
+        return list(raw)
+    return [raw]
+
+
+def _build_manual_symbol_rows(payload: dict) -> tuple[list[dict], list[str]]:
+    market_hint = (payload.get("market") or "CN").upper()
+    raw_items = payload.get("items")
+    if raw_items is None:
+        raw_items = payload.get("symbols")
+    if raw_items is None:
+        raw_items = payload.get("symbol")
+    items = _coerce_symbol_items(raw_items)
+    rows = []
+    skipped = []
+    for item in items:
+        if isinstance(item, dict):
+            symbol = item.get("symbol") or item.get("code") or item.get("ticker")
+            item_market = item.get("market") or market_hint
+            name = item.get("name") or item.get("co_name")
+            exchange = item.get("exchange") or item.get("cc")
+            industry = item.get("industry")
+        else:
+            symbol = item
+            item_market = market_hint
+            name = None
+            exchange = None
+            industry = None
+        if not symbol:
+            skipped.append(str(item))
+            continue
+        normalized = _normalize_symbol(str(symbol), str(item_market).upper())
+        if not normalized:
+            skipped.append(str(item))
+            continue
+        market_value = _market_from_symbol(normalized)
+        if exchange is None and market_value in {"CN", "SH", "SZ", "300"}:
+            exchange = market_value
+        if isinstance(exchange, str):
+            exchange = exchange.strip() or None
+        if isinstance(name, str):
+            name = name.strip() or None
+        if isinstance(industry, str):
+            industry = industry.strip() or None
+        rows.append(
+            {
+                "market": market_value,
+                "symbol": normalized,
+                "name": name,
+                "exchange": exchange,
+                "industry": industry,
+            }
+        )
+    return rows, skipped
+
+
 def _seed_symbols_if_empty(db: Session, market: str) -> int:
     markets = _market_scope(market)
     if crud.has_stock_symbols_any(db, markets):
@@ -1094,6 +1271,15 @@ def import_symbols(payload: dict, db: Session = Depends(get_db)):
     return schemas.APIResponse(message="Symbols imported", data={"count": count})
 
 
+@quant_router.post("/symbols/manual", response_model=schemas.APIResponse)
+def upsert_manual_symbols(payload: dict, db: Session = Depends(get_db)):
+    rows, skipped = _build_manual_symbol_rows(payload)
+    if not rows:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No symbols provided")
+    count = crud.upsert_stock_symbols(db, rows)
+    return schemas.APIResponse(message="Symbols upserted", data={"count": count, "skipped": skipped})
+
+
 @quant_router.get("/symbols", response_model=schemas.APIResponse)
 def search_symbols(
     market: str = "CN",
@@ -1112,6 +1298,9 @@ def search_symbols(
     if kind not in {"stock", "index", "all"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid kind")
     items, total = crud.search_stock_symbols(db, markets, query, kind, page, page_size)
+    if total == 0 and query and market in {"CN", "SH", "SZ", "300"}:
+        if _ensure_symbol_from_akshare(db, market, query):
+            items, total = crud.search_stock_symbols(db, markets, query, kind, page, page_size)
     payload = [
         schemas.StockSymbolRead(
             symbol=item.symbol,
@@ -1123,6 +1312,19 @@ def search_symbols(
         )
         for item in items
     ]
+    if total == 0:
+        kline_rows, total = crud.search_stock_symbols_from_klines(db, markets, query, kind, page, page_size)
+        payload = [
+            schemas.StockSymbolRead(
+                symbol=symbol,
+                market=market_value,
+                name=None,
+                exchange=market_value,
+                industry=None,
+                kind=_symbol_kind(symbol, None, None),
+            )
+            for market_value, symbol in kline_rows
+        ]
     return schemas.APIResponse(
         data={
             "items": payload,
@@ -1142,6 +1344,12 @@ def get_symbol(symbol: str, market: str = "CN", db: Session = Depends(get_db)):
         item = crud.get_stock_symbol(db, market_key, want)
         if item:
             break
+    if not item and market in {"CN", "SH", "SZ", "300"}:
+        if _ensure_symbol_from_akshare(db, market, want):
+            for market_key in _market_scope(market):
+                item = crud.get_stock_symbol(db, market_key, want)
+                if item:
+                    break
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Symbol not found")
     return schemas.APIResponse(
@@ -1309,10 +1517,11 @@ def _run_job(job_id: int):
                 "actions_rows": int(getattr(abu_result.action_pd, "shape", [0])[0]),
                 "benchmark": getattr(getattr(abu_result, "benchmark", None), "symbol", None),
             }
+            orders_pd = getattr(abu_result, "orders_pd", None)
+            summary.update(_summarize_orders(orders_pd))
             orders_preview = None
             actions_preview = None
             try:
-                orders_pd = getattr(abu_result, "orders_pd", None)
                 if orders_pd is not None and hasattr(orders_pd, "head") and hasattr(orders_pd, "to_json"):
                     import pandas as pd
 
@@ -1464,11 +1673,21 @@ def _run_job(job_id: int):
                             "actions_rows": int(getattr(abu_result.action_pd, "shape", [0])[0]),
                             "benchmark": getattr(getattr(abu_result, "benchmark", None), "symbol", None),
                         }
+                        summary.update(_summarize_orders(getattr(abu_result, "orders_pd", None)))
                         runs.append(summary)
                     if run_index >= max_runs:
                         break
 
-            runs_sorted = sorted(runs, key=lambda x: (x.get("orders_rows", 0), x.get("actions_rows", 0)), reverse=True)
+            runs_sorted = sorted(
+                runs,
+                key=lambda x: (
+                    x.get("profit_sum", 0),
+                    x.get("win_rate", 0),
+                    x.get("orders_rows", 0),
+                    x.get("actions_rows", 0),
+                ),
+                reverse=True,
+            )
             best = runs_sorted[0] if runs_sorted else None
             crud.set_quant_job_result(
                 db,
@@ -1636,8 +1855,20 @@ def _run_analysis_job(params: dict, db: Session) -> dict:
             if trends is None:
                 trends = {}
             trend_lines = []
-            x_start = 0
-            x_end = len(tl.tl) - 1
+            index_values = list(kl.close.index)
+
+            def _index_to_date_str(idx: int) -> Optional[str]:
+                if idx < 0 or idx >= len(index_values):
+                    return None
+                value = index_values[idx]
+                if hasattr(value, "strftime"):
+                    return value.strftime("%Y-%m-%d")
+                return str(value)
+
+            x_start_idx = 0
+            x_end_idx = len(tl.tl) - 1
+            x_start = _index_to_date_str(x_start_idx) or x_start_idx
+            x_end = _index_to_date_str(x_end_idx) or x_end_idx
             for key, lines in trends.items():
                 for line in lines:
                     if line is None:
@@ -1652,6 +1883,8 @@ def _run_analysis_job(params: dict, db: Session) -> dict:
                             "type": key,
                             "x_start": x_start,
                             "x_end": x_end,
+                            "x_start_idx": x_start_idx,
+                            "x_end_idx": x_end_idx,
                             "y_start": y_start,
                             "y_end": y_end,
                         }

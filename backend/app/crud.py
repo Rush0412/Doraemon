@@ -18,6 +18,15 @@ def _dedupe_rows(rows: list[dict], keys: tuple[str, ...]) -> list[dict]:
     return list(seen.values())
 
 
+def _market_filter(model, markets: Optional[list[str]]):
+    if not markets:
+        return None
+    pred = model.market.in_(markets)
+    if "300" in markets and "SZ" not in markets:
+        pred = or_(pred, and_(model.market == "SZ", model.symbol.ilike("sz3%")))
+    return pred
+
+
 def create_quant_job(db: Session, payload: schemas.QuantJobCreate) -> models.QuantJob:
     job = models.QuantJob(type=payload.type, params=payload.params, status="queued")
     db.add(job)
@@ -78,7 +87,9 @@ def search_stock_symbols(
     filters = []
     stmt = select(models.StockSymbol)
     if markets:
-        filters.append(models.StockSymbol.market.in_(markets))
+        market_pred = _market_filter(models.StockSymbol, markets)
+        if market_pred is not None:
+            filters.append(market_pred)
         prefix_filters = []
         if "SH" in markets:
             prefix_filters.append(models.StockSymbol.symbol.ilike("sh%"))
@@ -99,7 +110,7 @@ def search_stock_symbols(
     if query:
         cleaned = query.strip()
         if cleaned.isdigit():
-            filters.append(models.StockSymbol.symbol.ilike(f"%{cleaned}"))
+            filters.append(models.StockSymbol.symbol.ilike(f"%{cleaned}%"))
         else:
             like = f"%{cleaned}%"
             filters.append(
@@ -146,6 +157,78 @@ def search_stock_symbols(
     stmt = stmt.order_by(models.StockSymbol.symbol).offset(offset).limit(page_size)
     result = db.execute(stmt)
     return result.scalars().all(), int(total)
+
+
+def search_stock_symbols_from_klines(
+    db: Session,
+    markets: Optional[list[str]],
+    query: Optional[str],
+    kind: Optional[str],
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[list[tuple[str, str]], int]:
+    filters = []
+    stmt = select(models.StockKline.market, models.StockKline.symbol).distinct()
+    if markets:
+        market_pred = _market_filter(models.StockKline, markets)
+        if market_pred is not None:
+            filters.append(market_pred)
+        prefix_filters = []
+        if "SH" in markets:
+            prefix_filters.append(models.StockKline.symbol.ilike("sh%"))
+        if "SZ" in markets:
+            if "300" in markets:
+                prefix_filters.append(models.StockKline.symbol.ilike("sz%"))
+            else:
+                prefix_filters.append(
+                    and_(
+                        models.StockKline.symbol.ilike("sz%"),
+                        not_(models.StockKline.symbol.ilike("sz3%")),
+                    )
+                )
+        if "300" in markets:
+            prefix_filters.append(models.StockKline.symbol.ilike("sz3%"))
+        if prefix_filters:
+            filters.append(or_(*prefix_filters))
+    if query:
+        cleaned = query.strip()
+        if cleaned:
+            like = f"%{cleaned}%"
+            filters.append(models.StockKline.symbol.ilike(like))
+    if kind and kind != "all":
+        index_pred = or_(
+            models.StockKline.symbol.ilike("sh000%"),
+            models.StockKline.symbol.ilike("sz399%"),
+        )
+        if kind == "index":
+            filters.append(index_pred)
+        elif kind == "stock":
+            filters.append(not_(index_pred))
+            if markets:
+                if "SH" in markets:
+                    filters.append(
+                        or_(
+                            models.StockKline.symbol.ilike("sh6%"),
+                            models.StockKline.symbol.ilike("sh9%"),
+                        )
+                    )
+                if "SZ" in markets:
+                    filters.append(
+                        or_(
+                            models.StockKline.symbol.ilike("sz0%"),
+                            models.StockKline.symbol.ilike("sz2%"),
+                        )
+                    )
+                if "300" in markets and "SZ" not in markets:
+                    filters.append(models.StockKline.symbol.ilike("sz3%"))
+    if filters:
+        stmt = stmt.where(*filters)
+    total_stmt = select(func.count()).select_from(stmt.subquery())
+    total = db.execute(total_stmt).scalar_one()
+    offset = max(0, (page - 1) * page_size)
+    stmt = stmt.order_by(models.StockKline.symbol).offset(offset).limit(page_size)
+    result = db.execute(stmt)
+    return result.all(), int(total)
 
 
 def get_stock_symbol(db: Session, market: str, symbol: str) -> Optional[models.StockSymbol]:
