@@ -295,6 +295,14 @@
             </option>
           </select>
         </div>
+        <div>
+          <label class="label">买入策略列表</label>
+          <input v-model="gridForm.buy_strategies" placeholder="breakout, macd_cross" />
+        </div>
+        <div>
+          <label class="label">卖出策略列表</label>
+          <input v-model="gridForm.sell_strategies" placeholder="atr_stop, macd_cross" />
+        </div>
         <div v-for="param in (activeBuyStrategy?.params || [])" :key="`grid-buy-${param.key}`">
           <label class="label">{{ param.label }}列表</label>
           <input
@@ -310,6 +318,26 @@
             type="text"
             :placeholder="param.type === 'bool' ? 'true,false' : '0.5, 1.0'"
           />
+        </div>
+        <div>
+          <label class="label">验证模式</label>
+          <select v-model="gridForm.validation_mode" class="select">
+            <option value="none">不启用</option>
+            <option value="holdout">训练/验证切分</option>
+            <option value="walk_forward">滚动验证</option>
+          </select>
+        </div>
+        <div>
+          <label class="label">训练比例</label>
+          <input v-model.number="gridForm.train_ratio" type="number" min="0.5" max="0.9" step="0.05" />
+        </div>
+        <div v-if="gridForm.validation_mode === 'walk_forward'">
+          <label class="label">滚动窗口天数</label>
+          <input v-model.number="gridForm.walk_forward_days" type="number" min="60" />
+        </div>
+        <div v-if="gridForm.validation_mode === 'walk_forward'">
+          <label class="label">滚动步长天数</label>
+          <input v-model.number="gridForm.walk_forward_step_days" type="number" min="30" />
         </div>
         <div>
           <label class="label">最大运行次数</label>

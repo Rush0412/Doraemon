@@ -208,6 +208,33 @@
           </p>
           <p class="muted">切换到“策略验证”查看图表叠加效果。</p>
         </div>
+        <div v-if="analysisResult?.signal" class="info-card">
+          <h4>信号解读</h4>
+          <p class="muted">操作建议：{{ formatSignalAction(analysisResult.signal.action) }}</p>
+          <p class="muted">原因：{{ formatSignalReason(analysisResult.signal.action, analysisResult.signal.reason) }}</p>
+          <div class="result-grid">
+            <div>
+              <p class="muted">最新收盘</p>
+              <p class="metric-value">{{ formatNumber(analysisResult.signal.last_close) }}</p>
+            </div>
+            <div>
+              <p class="muted">支撑位</p>
+              <p class="metric-value">{{ formatNumber(analysisResult.signal.support) }}</p>
+            </div>
+            <div>
+              <p class="muted">阻力位</p>
+              <p class="metric-value">{{ formatNumber(analysisResult.signal.resistance) }}</p>
+            </div>
+            <div>
+              <p class="muted">止损</p>
+              <p class="metric-value">{{ formatNumber(analysisResult.signal.stop_loss) }}</p>
+            </div>
+            <div>
+              <p class="muted">止盈</p>
+              <p class="metric-value">{{ formatNumber(analysisResult.signal.take_profit) }}</p>
+            </div>
+          </div>
+        </div>
         <p v-else class="muted">暂无分析结果。</p>
       </div>
     </div>
@@ -215,6 +242,32 @@
 </template>
 
 <script setup>
+const formatNumber = (value) => {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return '-'
+  return num.toFixed(2)
+}
+
+const formatSignalAction = (action) => {
+  const key = String(action || '').toLowerCase()
+  if (key === 'breakout') return '突破上行'
+  if (key === 'breakdown') return '跌破支撑'
+  if (key === 'near_support') return '接近支撑'
+  if (key === 'near_resistance') return '接近阻力'
+  if (key === 'hold') return '观望'
+  return '观望'
+}
+
+const formatSignalReason = (action, reason) => {
+  const key = String(action || '').toLowerCase()
+  if (key === 'breakout') return '价格突破阻力位'
+  if (key === 'breakdown') return '价格跌破支撑位'
+  if (key === 'near_support') return '价格靠近支撑位'
+  if (key === 'near_resistance') return '价格靠近阻力位'
+  if (key === 'hold') return '暂无明确趋势信号'
+  return reason || '暂无明确趋势信号'
+}
+
 defineProps({
   active: Boolean,
   toolForm: Object,

@@ -357,11 +357,54 @@ def _build_param_grid(defaults: dict, grid: dict) -> list[dict]:
     return combos
 
 
+def _normalize_strategy_list(value, fallback: str) -> list[str]:
+    if value is None:
+        return [fallback]
+    if isinstance(value, str):
+        items = [item.strip().lower() for item in re.split(r"[\s,;，、]+", value) if item.strip()]
+        return items or [fallback]
+    if isinstance(value, (list, tuple, set)):
+        items = [str(item).strip().lower() for item in value if str(item).strip()]
+        return items or [fallback]
+    text = str(value).strip().lower()
+    return [text] if text else [fallback]
+
+
+def _strategy_id_set(group: str) -> set[str]:
+    return {item.get("id") for item in STRATEGY_CATALOG.get(group, []) if item.get("id")}
+
+
+def _validate_strategy_list(strategies: list[str], group: str):
+    allowed = _strategy_id_set(group)
+    unknown = [item for item in strategies if item not in allowed]
+    if unknown:
+        raise RuntimeError(f"Unknown {group} strategy: {unknown}. Allowed: {sorted(allowed)}")
+
+
+def _strategy_param_keys(strategy_id: str, group: str) -> set[str]:
+    items = STRATEGY_CATALOG.get(group, [])
+    for item in items:
+        if item.get("id") == strategy_id:
+            return {param.get("key") for param in item.get("params", []) if param.get("key")}
+    return set()
+
+
+def _filter_param_grid(strategy_id: str, group: str, grid: dict) -> dict:
+    if not grid:
+        return {}
+    allowed = _strategy_param_keys(strategy_id, group)
+    if not allowed:
+        return dict(grid)
+    return {key: value for key, value in grid.items() if key in allowed}
+
+
 def _summarize_orders(orders_pd):
     if orders_pd is None or getattr(orders_pd, "empty", True):
         return {
             "closed_orders": 0,
             "open_orders": 0,
+            "wins": 0,
+            "losses": 0,
             "profit_sum": 0.0,
             "profit_mean": 0.0,
             "win_rate": 0.0,
@@ -371,17 +414,175 @@ def _summarize_orders(orders_pd):
     closed = orders_pd[orders_pd["sell_type"].isin(["win", "loss"])]
     closed_count = int(getattr(closed, "shape", [0])[0])
     open_count = int(getattr(orders_pd, "shape", [0])[0]) - closed_count
+    wins = int((closed.get("result") == 1).sum()) if closed_count else 0
+    losses = max(0, closed_count - wins)
     profit_series = pd.to_numeric(closed.get("profit"), errors="coerce").fillna(0)
     profit_sum = float(profit_series.sum()) if closed_count else 0.0
     profit_mean = float(profit_series.mean()) if closed_count else 0.0
-    win_rate = float((closed["result"] == 1).mean() * 100) if closed_count else 0.0
+    win_rate = float((wins / closed_count) * 100) if closed_count else 0.0
     return {
         "closed_orders": closed_count,
         "open_orders": max(0, open_count),
+        "wins": wins,
+        "losses": losses,
         "profit_sum": profit_sum,
         "profit_mean": profit_mean,
         "win_rate": win_rate,
     }
+
+
+def _summarize_capital(capital):
+    if capital is None or not hasattr(capital, "capital_pd"):
+        return {}
+    import pandas as pd
+    import numpy as np
+    from abupy.CoreBu import ABuEnv
+
+    raw_series = pd.to_numeric(capital.capital_pd.get("capital_blance"), errors="coerce")
+    if not hasattr(raw_series, "dropna"):
+        raw_series = pd.Series([raw_series])
+    series = raw_series.dropna()
+    if series is None or len(series) < 2:
+        return {}
+    returns = series.pct_change().dropna()
+    if returns.empty:
+        return {}
+    trade_year = getattr(ABuEnv, "g_market_trade_year", 252)
+    total_return = float(series.iloc[-1] / series.iloc[0] - 1)
+    annual_return = (1 + total_return) ** (trade_year / len(returns)) - 1 if len(returns) else total_return
+    volatility = float(returns.std() * np.sqrt(trade_year)) if returns.std() else 0.0
+    sharpe = float((returns.mean() / returns.std()) * np.sqrt(trade_year)) if returns.std() else 0.0
+    cum = (1 + returns).cumprod()
+    peak = cum.cummax()
+    drawdown = (peak - cum) / peak
+    max_drawdown = float(drawdown.max()) if not drawdown.empty else 0.0
+    return {
+        "annual_return": annual_return,
+        "volatility": volatility,
+        "sharpe": sharpe,
+        "max_drawdown": max_drawdown,
+    }
+
+
+def _summarize_run(abu_result):
+    summary = _summarize_orders(getattr(abu_result, "orders_pd", None))
+    summary.update(_summarize_capital(getattr(abu_result, "capital", None)))
+    return summary
+
+
+def _aggregate_summaries(items: list[dict]) -> dict:
+    if not items:
+        return {}
+    closed_orders = 0
+    open_orders = 0
+    wins = 0
+    losses = 0
+    profit_sum = 0.0
+    annual_returns = []
+    volatilities = []
+    sharpes = []
+    max_drawdowns = []
+    for item in items:
+        if not item:
+            continue
+        closed_orders += int(item.get("closed_orders", 0) or 0)
+        open_orders += int(item.get("open_orders", 0) or 0)
+        wins += int(item.get("wins", 0) or 0)
+        losses += int(item.get("losses", 0) or 0)
+        profit_sum += float(item.get("profit_sum", 0.0) or 0.0)
+        for key, bucket in (
+            ("annual_return", annual_returns),
+            ("volatility", volatilities),
+            ("sharpe", sharpes),
+            ("max_drawdown", max_drawdowns),
+        ):
+            value = item.get(key)
+            if value is None:
+                continue
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value != value:
+                continue
+            bucket.append(value)
+    profit_mean = profit_sum / closed_orders if closed_orders else 0.0
+    win_rate = (wins / closed_orders) * 100 if closed_orders else 0.0
+    avg_return = sum(annual_returns) / len(annual_returns) if annual_returns else 0.0
+    avg_volatility = sum(volatilities) / len(volatilities) if volatilities else 0.0
+    avg_sharpe = sum(sharpes) / len(sharpes) if sharpes else 0.0
+    max_drawdown = max(max_drawdowns) if max_drawdowns else 0.0
+    return {
+        "closed_orders": closed_orders,
+        "open_orders": open_orders,
+        "wins": wins,
+        "losses": losses,
+        "profit_sum": profit_sum,
+        "profit_mean": profit_mean,
+        "win_rate": win_rate,
+        "annual_return": avg_return,
+        "volatility": avg_volatility,
+        "sharpe": avg_sharpe,
+        "max_drawdown": max_drawdown,
+    }
+
+
+def _prefix_summary(summary: dict, prefix: str) -> dict:
+    return {f"{prefix}{key}": value for key, value in summary.items()} if summary else {}
+
+
+def _resolve_date_bounds(
+    db: Session, symbols: list[str], start: Optional[str], end: Optional[str], n_folds: int
+) -> tuple[Optional[date], Optional[date]]:
+    start_date = _parse_date_str(start)
+    end_date = _parse_date_str(end)
+    if start_date and end_date:
+        return start_date, end_date
+    if symbols:
+        rows = crud.load_klines(db, _market_from_symbol(symbols[0]), symbols[0])
+        if rows:
+            first = rows[0].trade_date
+            last = rows[-1].trade_date
+            if not start_date:
+                start_date = first
+            if not end_date:
+                end_date = last
+    if not end_date:
+        end_date = date.today()
+    if not start_date:
+        start_date = end_date - timedelta(days=365 * max(1, int(n_folds)))
+    return start_date, end_date
+
+
+def _split_holdout(start_date: date, end_date: date, train_ratio: float):
+    total_days = (end_date - start_date).days
+    if total_days <= 1:
+        return None
+    ratio = max(0.5, min(0.9, train_ratio))
+    train_days = max(1, int(total_days * ratio))
+    train_end = start_date + timedelta(days=train_days)
+    val_start = train_end + timedelta(days=1)
+    if val_start >= end_date:
+        return None
+    return (start_date, train_end, val_start, end_date)
+
+
+def _walk_forward_slices(
+    start_date: date, end_date: date, train_ratio: float, window_days: int, step_days: int
+):
+    ratio = max(0.5, min(0.9, train_ratio))
+    window = max(60, int(window_days))
+    step = max(30, int(step_days))
+    slices = []
+    cursor = start_date
+    while cursor + timedelta(days=window) < end_date:
+        window_start = cursor
+        window_end = min(end_date, cursor + timedelta(days=window))
+        split = _split_holdout(window_start, window_end, ratio)
+        if split:
+            slices.append(split)
+        cursor += timedelta(days=step)
+    return slices
 
 
 def _build_buy_factors(params: dict) -> list[dict]:
@@ -468,8 +669,7 @@ def _build_buy_factors(params: dict) -> list[dict]:
         xd = _param_int(config, "xd", 20)
         return [{"class": AbuFactorBuyPutXDBK, "xd": xd}]
 
-    xd = _param_int(config, "xd", _param_int(params, "buy_xd", 42))
-    return [{"class": AbuFactorBuyBreak, "xd": xd}]
+    raise ValueError(f"Unknown buy strategy: {strategy_id}")
 
 
 def _build_sell_factors(params: dict) -> list[dict]:
@@ -539,13 +739,7 @@ def _build_sell_factors(params: dict) -> list[dict]:
             }
         ]
 
-    return [
-        {
-            "class": AbuFactorAtrNStop,
-            "stop_loss_n": _param_float(config, "stop_loss_n", _param_float(params, "stop_loss_n", 0.5)),
-            "stop_win_n": _param_float(config, "stop_win_n", _param_float(params, "stop_win_n", 3.0)),
-        }
-    ]
+    raise ValueError(f"Unknown sell strategy: {strategy_id}")
 
 
 def _parse_trade_date(value) -> Optional[date]:
@@ -1493,6 +1687,10 @@ def _run_job(job_id: int):
                 job.params.get("n_folds", 1),
             ):
                 benchmark_symbol = available_symbols[0]
+            buy_strategy = (job.params.get("buy_strategy") or "breakout").strip().lower()
+            sell_strategy = (job.params.get("sell_strategy") or "atr_stop").strip().lower()
+            _validate_strategy_list([buy_strategy], "buy")
+            _validate_strategy_list([sell_strategy], "sell")
             buy_factors = _build_buy_factors(job.params)
             sell_factors = _build_sell_factors(job.params)
             fallback_symbol = benchmark_symbol
@@ -1513,12 +1711,17 @@ def _run_job(job_id: int):
             summary = {
                 "market": market,
                 "symbols": symbols,
+                "buy_strategy": buy_strategy,
+                "sell_strategy": sell_strategy,
+                "buy_params": _params_dict(job.params.get("buy_params")),
+                "sell_params": _params_dict(job.params.get("sell_params")),
                 "orders_rows": int(getattr(abu_result.orders_pd, "shape", [0])[0]),
                 "actions_rows": int(getattr(abu_result.action_pd, "shape", [0])[0]),
                 "benchmark": getattr(getattr(abu_result, "benchmark", None), "symbol", None),
             }
             orders_pd = getattr(abu_result, "orders_pd", None)
             summary.update(_summarize_orders(orders_pd))
+            summary.update(_summarize_capital(getattr(abu_result, "capital", None)))
             orders_preview = None
             actions_preview = None
             try:
@@ -1615,8 +1818,13 @@ def _run_job(job_id: int):
 
             buy_strategy = (job.params.get("buy_strategy") or "breakout").strip().lower()
             sell_strategy = (job.params.get("sell_strategy") or "atr_stop").strip().lower()
-            buy_defaults = _find_strategy_defaults(buy_strategy, "buy")
-            sell_defaults = _find_strategy_defaults(sell_strategy, "sell")
+            buy_strategy_list = _normalize_strategy_list(job.params.get("buy_strategies"), buy_strategy)
+            sell_strategy_list = _normalize_strategy_list(job.params.get("sell_strategies"), sell_strategy)
+            buy_strategy_list = list(dict.fromkeys(buy_strategy_list))
+            sell_strategy_list = list(dict.fromkeys(sell_strategy_list))
+            _validate_strategy_list(buy_strategy_list, "buy")
+            _validate_strategy_list(sell_strategy_list, "sell")
+
             buy_params_grid = job.params.get("buy_params_grid") or {}
             sell_params_grid = job.params.get("sell_params_grid") or {}
 
@@ -1626,68 +1834,149 @@ def _run_job(job_id: int):
                 sell_params_grid["stop_loss_n"] = job.params.get("stop_loss_n_list")
             if "stop_win_n" not in sell_params_grid and job.params.get("stop_win_n_list"):
                 sell_params_grid["stop_win_n"] = job.params.get("stop_win_n_list")
-
-            buy_param_sets = _build_param_grid(buy_defaults, buy_params_grid)
-            sell_param_sets = _build_param_grid(sell_defaults, sell_params_grid)
             max_runs = int(job.params.get("max_runs", 30))
-            max_runs = max(1, min(max_runs, 200))
+            max_runs = max(1, min(max_runs, 5000))
 
             runs = []
+            validation_mode = (job.params.get("validation_mode") or "none").strip().lower()
+            train_ratio = float(job.params.get("train_ratio", 0.7))
+            walk_forward_days = int(job.params.get("walk_forward_days", 365))
+            walk_forward_step_days = int(job.params.get("walk_forward_step_days", 180))
+            validation_slices = []
+            if validation_mode in {"holdout", "walk_forward"}:
+                start_date, end_date = _resolve_date_bounds(db, symbols, start, end, n_folds)
+                if start_date and end_date:
+                    if validation_mode == "holdout":
+                        split = _split_holdout(start_date, end_date, train_ratio)
+                        if split:
+                            validation_slices = [split]
+                    else:
+                        validation_slices = _walk_forward_slices(
+                            start_date, end_date, train_ratio, walk_forward_days, walk_forward_step_days
+                        )
             fallback_symbol = benchmark_symbol
             with _with_pg_data_env(market), _with_benchmark_fallback(fallback_symbol):
+                pairs = [(bs, ss) for bs in buy_strategy_list for ss in sell_strategy_list]
+                if not pairs:
+                    pairs = [(buy_strategy, sell_strategy)]
+                base_budget = max_runs // len(pairs)
+                remainder = max_runs % len(pairs)
                 run_index = 0
-                for buy_params in buy_param_sets:
-                    for sell_params in sell_param_sets:
-                        if run_index >= max_runs:
+                for idx, (buy_strategy, sell_strategy) in enumerate(pairs):
+                    budget = base_budget + (1 if idx < remainder else 0)
+                    if budget <= 0:
+                        continue
+                    buy_defaults = _find_strategy_defaults(buy_strategy, "buy")
+                    buy_grid_filtered = _filter_param_grid(buy_strategy, "buy", buy_params_grid)
+                    buy_param_sets = _build_param_grid(buy_defaults, buy_grid_filtered)
+                    sell_defaults = _find_strategy_defaults(sell_strategy, "sell")
+                    sell_grid_filtered = _filter_param_grid(sell_strategy, "sell", sell_params_grid)
+                    sell_param_sets = _build_param_grid(sell_defaults, sell_grid_filtered)
+                    pair_runs = 0
+                    for buy_params in buy_param_sets:
+                        for sell_params in sell_param_sets:
+                            if pair_runs >= budget or run_index >= max_runs:
+                                break
+                            combo_params = dict(job.params)
+                            combo_params["buy_strategy"] = buy_strategy
+                            combo_params["sell_strategy"] = sell_strategy
+                            combo_params["buy_params"] = buy_params
+                            combo_params["sell_params"] = sell_params
+                            buy_factors = _build_buy_factors(combo_params)
+                            sell_factors = _build_sell_factors(combo_params)
+                            run_index += 1
+                            pair_runs += 1
+                            summary = {
+                                "buy_strategy": buy_strategy,
+                                "sell_strategy": sell_strategy,
+                                "buy_params": buy_params,
+                                "sell_params": sell_params,
+                                "buy_xd": buy_params.get("xd"),
+                                "stop_loss_n": sell_params.get("stop_loss_n"),
+                                "stop_win_n": sell_params.get("stop_win_n"),
+                                "benchmark": benchmark_symbol,
+                                "validation_mode": validation_mode if validation_slices else "none",
+                            }
+                            if validation_slices:
+                                train_summaries = []
+                                validation_summaries = []
+                                for train_start, train_end, val_start, val_end in validation_slices:
+                                    train_result, _ = abu.run_loop_back(
+                                        read_cash=cash,
+                                        buy_factors=buy_factors,
+                                        sell_factors=sell_factors,
+                                        choice_symbols=symbols,
+                                        n_folds=n_folds,
+                                        start=train_start.isoformat(),
+                                        end=train_end.isoformat(),
+                                        n_process_kl=1,
+                                        n_process_pick=1,
+                                    )
+                                    if train_result is not None:
+                                        train_summaries.append(_summarize_run(train_result))
+                                    val_result, _ = abu.run_loop_back(
+                                        read_cash=cash,
+                                        buy_factors=buy_factors,
+                                        sell_factors=sell_factors,
+                                        choice_symbols=symbols,
+                                        n_folds=n_folds,
+                                        start=val_start.isoformat(),
+                                        end=val_end.isoformat(),
+                                        n_process_kl=1,
+                                        n_process_pick=1,
+                                    )
+                                    if val_result is not None:
+                                        validation_summaries.append(_summarize_run(val_result))
+                                if not train_summaries and not validation_summaries:
+                                    continue
+                                train_summary = _aggregate_summaries(train_summaries)
+                                validation_summary = _aggregate_summaries(validation_summaries)
+                                summary.update(_prefix_summary(train_summary, "train_"))
+                                summary.update(_prefix_summary(validation_summary, "validation_"))
+                                summary["train_runs"] = len(train_summaries)
+                                summary["validation_runs"] = len(validation_summaries)
+                                summary["orders_rows"] = int(
+                                    summary.get("validation_closed_orders", 0) + summary.get("validation_open_orders", 0)
+                                )
+                                summary["actions_rows"] = 0
+                            else:
+                                abu_result, _ = abu.run_loop_back(
+                                    read_cash=cash,
+                                    buy_factors=buy_factors,
+                                    sell_factors=sell_factors,
+                                    choice_symbols=symbols,
+                                    n_folds=n_folds,
+                                    start=start,
+                                    end=end,
+                                    n_process_kl=1,
+                                    n_process_pick=1,
+                                )
+                                if abu_result is None:
+                                    continue
+                                summary["benchmark"] = getattr(getattr(abu_result, "benchmark", None), "symbol", None)
+                                summary.update(_summarize_run(abu_result))
+                                summary["orders_rows"] = int(
+                                    summary.get("closed_orders", 0) + summary.get("open_orders", 0)
+                                )
+                                summary["actions_rows"] = int(getattr(abu_result.action_pd, "shape", [0])[0])
+                            runs.append(summary)
+                        if pair_runs >= budget or run_index >= max_runs:
                             break
-                        combo_params = dict(job.params)
-                        combo_params["buy_strategy"] = buy_strategy
-                        combo_params["sell_strategy"] = sell_strategy
-                        combo_params["buy_params"] = buy_params
-                        combo_params["sell_params"] = sell_params
-                        buy_factors = _build_buy_factors(combo_params)
-                        sell_factors = _build_sell_factors(combo_params)
-                        run_index += 1
-                        abu_result, _ = abu.run_loop_back(
-                            read_cash=cash,
-                            buy_factors=buy_factors,
-                            sell_factors=sell_factors,
-                            choice_symbols=symbols,
-                            n_folds=n_folds,
-                            start=start,
-                            end=end,
-                            n_process_kl=1,
-                            n_process_pick=1,
-                        )
-                        if abu_result is None:
-                            continue
-                        summary = {
-                            "buy_strategy": buy_strategy,
-                            "sell_strategy": sell_strategy,
-                            "buy_params": buy_params,
-                            "sell_params": sell_params,
-                            "buy_xd": buy_params.get("xd"),
-                            "stop_loss_n": sell_params.get("stop_loss_n"),
-                            "stop_win_n": sell_params.get("stop_win_n"),
-                            "orders_rows": int(getattr(abu_result.orders_pd, "shape", [0])[0]),
-                            "actions_rows": int(getattr(abu_result.action_pd, "shape", [0])[0]),
-                            "benchmark": getattr(getattr(abu_result, "benchmark", None), "symbol", None),
-                        }
-                        summary.update(_summarize_orders(getattr(abu_result, "orders_pd", None)))
-                        runs.append(summary)
                     if run_index >= max_runs:
                         break
 
-            runs_sorted = sorted(
-                runs,
-                key=lambda x: (
-                    x.get("profit_sum", 0),
-                    x.get("win_rate", 0),
-                    x.get("orders_rows", 0),
-                    x.get("actions_rows", 0),
-                ),
-                reverse=True,
-            )
+            def _grid_sort_key(item: dict):
+                profit = item.get("validation_profit_sum")
+                if profit is None:
+                    profit = item.get("profit_sum", 0)
+                win_rate = item.get("validation_win_rate", item.get("win_rate", 0))
+                sharpe = item.get("validation_sharpe", item.get("sharpe", 0))
+                annual_return = item.get("validation_annual_return", item.get("annual_return", 0))
+                drawdown = item.get("validation_max_drawdown", item.get("max_drawdown", 0))
+                closed_orders = item.get("validation_closed_orders", item.get("closed_orders", 0))
+                return (profit, sharpe, win_rate, annual_return, -drawdown, closed_orders)
+
+            runs_sorted = sorted(runs, key=_grid_sort_key, reverse=True)
             best = runs_sorted[0] if runs_sorted else None
             crud.set_quant_job_result(
                 db,
@@ -1697,6 +1986,13 @@ def _run_job(job_id: int):
                     "symbols": symbols,
                     "buy_strategy": buy_strategy,
                     "sell_strategy": sell_strategy,
+                    "buy_strategies": buy_strategy_list,
+                    "sell_strategies": sell_strategy_list,
+                    "validation_mode": validation_mode if validation_slices else "none",
+                    "validation_slices": len(validation_slices),
+                    "train_ratio": train_ratio,
+                    "walk_forward_days": walk_forward_days,
+                    "walk_forward_step_days": walk_forward_step_days,
                     "max_runs": max_runs,
                     "best": best,
                     "runs": runs_sorted[:200],
@@ -1889,10 +2185,82 @@ def _run_analysis_job(params: dict, db: Session) -> dict:
                             "y_end": y_end,
                         }
                     )
+            signal = None
+            try:
+                last_close = float(kl.close.iloc[-1])
+                last_idx = len(kl.close) - 1
+
+                def _line_value_at(line_item, idx):
+                    x0 = int(line_item.get("x_start_idx", 0))
+                    x1 = int(line_item.get("x_end_idx", 0))
+                    y0 = float(line_item.get("y_start", 0))
+                    y1 = float(line_item.get("y_end", 0))
+                    if x1 == x0:
+                        return y1
+                    slope = (y1 - y0) / (x1 - x0)
+                    return y0 + slope * (idx - x0)
+
+                supports = []
+                resistances = []
+                for item in trend_lines:
+                    value = _line_value_at(item, last_idx)
+                    if item.get("type") == "support":
+                        supports.append(value)
+                    elif item.get("type") == "resistance":
+                        resistances.append(value)
+                support = max([v for v in supports if v <= last_close], default=None)
+                resistance = min([v for v in resistances if v >= last_close], default=None)
+
+                near_threshold = 0.01
+                breakout_threshold = 0.015
+                action = "hold"
+                reason = "No strong signal"
+                if resistance and last_close > resistance * (1 + breakout_threshold):
+                    action = "breakout"
+                    reason = "Price breaks above resistance"
+                elif support and last_close < support * (1 - breakout_threshold):
+                    action = "breakdown"
+                    reason = "Price breaks below support"
+                elif support and (last_close - support) / support <= near_threshold:
+                    action = "near_support"
+                    reason = "Price is near support"
+                elif resistance and (resistance - last_close) / resistance <= near_threshold:
+                    action = "near_resistance"
+                    reason = "Price is near resistance"
+
+                atr = None
+                for col in ("atr14", "atr21"):
+                    if col in kl.columns:
+                        value = kl[col].iloc[-1]
+                        if value is not None:
+                            atr = float(value)
+                            if atr > 0:
+                                break
+                if atr is None or atr <= 0:
+                    if {"high", "low"}.issubset(kl.columns):
+                        atr = float((kl.high - kl.low).tail(14).mean())
+                stop_loss = None
+                take_profit = None
+                if atr and atr > 0:
+                    stop_loss = last_close - 1.5 * atr
+                    take_profit = last_close + 3.0 * atr
+
+                signal = {
+                    "action": action,
+                    "reason": reason,
+                    "last_close": last_close,
+                    "support": support,
+                    "resistance": resistance,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                }
+            except Exception:
+                signal = None
             return {
                 "tool": tool,
                 "symbol": symbol,
                 "trend_lines": trend_lines,
+                "signal": signal,
                 "close": _series_points(kl.close, limit=limit),
             }
 

@@ -311,6 +311,12 @@ const gridForm = reactive({
   buy_xd_list: '20, 42, 60',
   stop_loss_n_list: '0.5, 1.0',
   stop_win_n_list: '2.0, 3.0',
+  buy_strategies: '',
+  sell_strategies: '',
+  validation_mode: 'none',
+  train_ratio: 0.7,
+  walk_forward_days: 365,
+  walk_forward_step_days: 180,
   n_folds: 1,
   start: '',
   end: '',
@@ -1240,13 +1246,13 @@ const loadKlineChart = async () => {
 
 const parseStringList = (raw) =>
   String(raw)
-    .split(/[\s,;]+/)
+    .split(/[\s,;，、]+/)
     .map((item) => item.trim())
     .filter(Boolean)
 
 const parseNumberList = (raw) =>
   String(raw)
-    .split(/[\s,;]+/)
+    .split(/[\s,;，、]+/)
     .map((item) => Number(item))
     .filter((item) => Number.isFinite(item))
 
@@ -1511,6 +1517,8 @@ const runBacktest = async () => {
 const runGridSearch = async () => {
   const buyGrid = buildGridParamPayload(activeBuyStrategy.value, gridBuyParamLists)
   const sellGrid = buildGridParamPayload(activeSellStrategy.value, gridSellParamLists)
+  const buyStrategyList = parseStringList(gridForm.buy_strategies)
+  const sellStrategyList = parseStringList(gridForm.sell_strategies)
   const job = await store.startGridSearch({
     market: gridForm.market,
     symbols: gridForm.symbols,
@@ -1520,8 +1528,14 @@ const runGridSearch = async () => {
     cash: gridForm.cash,
     buy_strategy: buyStrategyId.value,
     sell_strategy: sellStrategyId.value,
+    buy_strategies: buyStrategyList.length ? buyStrategyList : undefined,
+    sell_strategies: sellStrategyList.length ? sellStrategyList : undefined,
     buy_params_grid: buyGrid,
     sell_params_grid: sellGrid,
+    validation_mode: gridForm.validation_mode,
+    train_ratio: gridForm.train_ratio,
+    walk_forward_days: gridForm.walk_forward_days,
+    walk_forward_step_days: gridForm.walk_forward_step_days,
     max_runs: gridForm.max_runs
   })
   await store.fetchJob(job.id)
