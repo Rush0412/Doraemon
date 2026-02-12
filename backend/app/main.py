@@ -27,7 +27,13 @@ logger = logging.getLogger("doraemon")
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title=settings.app_name, version="1.0.0", openapi_url=f"{settings.api_prefix}/openapi.json")
+app = FastAPI(
+    title=settings.app_name,
+    version="1.0.0",
+    openapi_url=f"{settings.api_prefix}/openapi.json",
+    docs_url=f"{settings.api_prefix}/docs",
+    redoc_url=f"{settings.api_prefix}/redoc",
+)
 
 app.add_middleware(
     CORSMiddleware,
