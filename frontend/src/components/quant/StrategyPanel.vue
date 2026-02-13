@@ -1,6 +1,6 @@
 <template>
-  <section class="grid grid-2" v-show="active">
-    <div class="panel">
+  <section class="grid grid-2 strategy-layout" v-show="active">
+    <div class="panel strategy-main">
       <header class="panel-title">
         <div>
           <h2>历史回测</h2>
@@ -112,7 +112,7 @@
           </div>
         </div>
       </div>
-      <div v-if="showBacktestVisual" class="result-card backtest-visual">
+      <div v-if="showBacktestVisual" class="result-card backtest-visual trading-stage">
         <h3>回测可视化</h3>
         <div class="result-grid" v-if="backtestTradeStats">
           <div>
@@ -185,6 +185,31 @@
         <div class="equity-chart" :ref="setEquityContainer">
           <p v-if="!equityData.length" class="muted">暂无收益曲线</p>
         </div>
+        <div v-if="operationSuggestion" class="result-card advice-card">
+          <h3>当日操作建议</h3>
+          <div class="result-grid">
+            <div>
+              <p class="muted">建议动作</p>
+              <p class="metric-value">{{ operationSuggestion.actionText }}</p>
+            </div>
+            <div>
+              <p class="muted">信号强度</p>
+              <p class="metric-value">{{ operationSuggestion.confidence }}</p>
+            </div>
+            <div>
+              <p class="muted">最新收盘</p>
+              <p class="metric-value">{{ formatNumber(operationSuggestion.lastClose) }}</p>
+            </div>
+            <div>
+              <p class="muted">止损 / 止盈</p>
+              <p class="metric-value">
+                {{ formatNumber(operationSuggestion.stopLoss) }} / {{ formatNumber(operationSuggestion.takeProfit) }}
+              </p>
+            </div>
+          </div>
+          <p class="panel-note">{{ operationSuggestion.reason }}</p>
+          <p class="muted" v-if="operationSuggestion.hint">{{ operationSuggestion.hint }}</p>
+        </div>
         <div v-if="filteredOrders.length" class="result-card">
           <h3>交易明细</h3>
           <div class="table-wrap">
@@ -253,7 +278,7 @@
       </div>
     </div>
 
-    <div class="panel">
+    <div class="panel strategy-side">
       <header class="panel-title">
         <div>
           <h2>参数交叉验证</h2>
@@ -262,20 +287,53 @@
         <span class="pill">Grid</span>
       </header>
       <p class="panel-note">结果里的最佳参数可一键回填到回测；寻优范围越大运行越久。</p>
+      <div class="toolbar strategy-merge-toggle">
+        <label class="toggle">
+          <input type="checkbox" v-model="gridUseBacktestBaseProxy" />
+          <span>复用回测基础参数（市场、标的、资金、日期、年数）</span>
+        </label>
+      </div>
+      <div v-if="gridUseBacktestBaseProxy" class="selection strategy-shared-summary">
+        <div class="selection-head">
+          <strong>当前共用回测基础参数</strong>
+        </div>
+        <div class="result-grid">
+          <div>
+            <p class="muted">市场</p>
+            <p class="mono">{{ backtestForm.market || '-' }}</p>
+          </div>
+          <div>
+            <p class="muted">标的</p>
+            <p class="mono">{{ backtestForm.symbols || '-' }}</p>
+          </div>
+          <div>
+            <p class="muted">初始资金</p>
+            <p class="mono">{{ formatNumber(backtestForm.cash, 0) }}</p>
+          </div>
+          <div>
+            <p class="muted">开始/结束</p>
+            <p class="mono">{{ backtestForm.start || '-' }} / {{ backtestForm.end || '-' }}</p>
+          </div>
+          <div>
+            <p class="muted">回溯年数</p>
+            <p class="mono">{{ backtestForm.n_folds ?? '-' }}</p>
+          </div>
+        </div>
+      </div>
       <div class="form-grid">
-        <div>
+        <div v-if="!gridUseBacktestBaseProxy">
           <label class="label">标的列表</label>
           <input v-model="gridForm.symbols" placeholder="sh600036, sz000001" />
         </div>
-        <div>
+        <div v-if="!gridUseBacktestBaseProxy">
           <label class="label">初始资金</label>
           <input v-model.number="gridForm.cash" type="number" min="1000" />
         </div>
-        <div>
+        <div v-if="!gridUseBacktestBaseProxy">
           <label class="label">开始日期</label>
           <input v-model="gridForm.start" type="date" />
         </div>
-        <div>
+        <div v-if="!gridUseBacktestBaseProxy">
           <label class="label">结束日期</label>
           <input v-model="gridForm.end" type="date" />
         </div>
@@ -343,7 +401,7 @@
           <label class="label">最大运行次数</label>
           <input v-model.number="gridForm.max_runs" type="number" min="1" />
         </div>
-        <div>
+        <div v-if="!gridUseBacktestBaseProxy">
           <label class="label">回溯年数</label>
           <input v-model.number="gridForm.n_folds" type="number" min="1" />
         </div>
@@ -371,6 +429,7 @@ const props = defineProps({
   active: Boolean,
   backtestForm: Object,
   gridForm: Object,
+  gridUseBacktestBase: Boolean,
   buyStrategies: Array,
   sellStrategies: Array,
   activeBuyStrategy: Object,
@@ -396,6 +455,7 @@ const props = defineProps({
   hoverInfo: Object,
   klineData: Array,
   equityData: Array,
+  operationSuggestion: Object,
   filteredOrders: Array,
   pagedOrders: Array,
   orderPage: Number,
@@ -420,6 +480,7 @@ const props = defineProps({
 const emit = defineEmits([
   'update:buyStrategyId',
   'update:sellStrategyId',
+  'update:gridUseBacktestBase',
   'update:chartSymbol',
   'update:orderFilter',
   'update:selectedOrderKey',
@@ -441,6 +502,11 @@ const sellStrategyIdProxy = computed({
 const chartSymbolProxy = computed({
   get: () => props.chartSymbol,
   set: (value) => emit('update:chartSymbol', value)
+})
+
+const gridUseBacktestBaseProxy = computed({
+  get: () => !!props.gridUseBacktestBase,
+  set: (value) => emit('update:gridUseBacktestBase', value)
 })
 
 const orderFilterProxy = computed({
@@ -468,3 +534,4 @@ const orderPageSizeProxy = computed({
   set: (value) => emit('update:orderPageSize', value)
 })
 </script>
+

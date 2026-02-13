@@ -91,7 +91,7 @@ class AbuDataParseWrap(object):
 
             # 从收盘价格序列shift出昨收价格序列
             warp_self.df['pre_close'] = warp_self.df['close'].shift(1)
-            warp_self.df['pre_close'].fillna(warp_self.df['open'], axis=0, inplace=True)
+            warp_self.df['pre_close'] = warp_self.df['pre_close'].fillna(warp_self.df['open'])
             # 添加日期int列
             warp_self.df['date'] = warp_self.df['date'].apply(lambda x: ABuDateUtil.date_str_to_int(str(x)))
             # 添加周几列date_week，值为0-4，分别代表周一到周五
@@ -339,7 +339,7 @@ class BDParser(object):
                 del_columns(self.df, ['amount'])
                 if BDParser.s_calc_dm:
                     self.df['pre_close'] = self.df['close'].shift(1)
-                    self.df['pre_close'].fillna(self.df['open'], axis=0, inplace=True)
+                    self.df['pre_close'] = self.df['pre_close'].fillna(self.df['open'])
                     # 不使用df['close'].pct_change计算
                     # noinspection PyTypeChecker
                     self.df['p_change'] = np.where(self.df['pre_close'] == 0, 0,

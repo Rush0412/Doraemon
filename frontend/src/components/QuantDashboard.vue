@@ -100,6 +100,7 @@
       :active="activeTab === 'strategy'"
       :backtest-form="backtestForm"
       :grid-form="gridForm"
+      v-model:grid-use-backtest-base="gridUseBacktestBase"
       :buy-strategies="buyStrategies"
       :sell-strategies="sellStrategies"
       :active-buy-strategy="activeBuyStrategy"
@@ -125,6 +126,7 @@
       :hover-info="hoverInfo"
       :kline-data="klineData"
       :equity-data="equityData"
+      :operation-suggestion="operationSuggestion"
       :filtered-orders="filteredOrders"
       :paged-orders="pagedOrders"
       v-model:order-page="orderPage"
@@ -262,6 +264,7 @@ const selectedOrderKey = ref('')
 const selectedOrder = ref(null)
 const showStopLines = ref(true)
 const analysisOverlayEnabled = ref(true)
+const gridUseBacktestBase = ref(true)
 const orderPage = ref(1)
 const orderPageSize = ref(20)
 const setKlineContainer = (el) => {
@@ -536,7 +539,7 @@ const showBacktestVisual = computed(() => {
 })
 
 const chartWindow = reactive({
-  size: 160,
+  size: 220,
   offset: 0
 })
 const hoverInfo = ref(null)
@@ -561,6 +564,81 @@ const gridSummaryText = computed(() =>
 const analysisText = computed(() =>
   analysisResult.value ? JSON.stringify(analysisResult.value, null, 2) : ''
 )
+
+const operationSuggestion = computed(() => {
+  const signal = analysisResult.value?.signal || null
+  const stats = backtestTradeStats.value
+  const hasGridBest = !!gridSummary.value
+
+  let direction = 'watch'
+  let reason = '暂无明确趋势信号，建议等待更清晰的突破或回踩确认。'
+  let score = 0
+
+  if (signal?.action === 'breakout') {
+    direction = 'buy'
+    reason = signal.reason || '价格向上突破阻力位。'
+    score += 2
+  } else if (signal?.action === 'near_support') {
+    direction = 'buy_watch'
+    reason = signal.reason || '价格接近支撑位，可等待止跌确认。'
+    score += 1
+  } else if (signal?.action === 'breakdown') {
+    direction = 'sell'
+    reason = signal.reason || '价格向下跌破支撑位。'
+    score -= 2
+  } else if (signal?.action === 'near_resistance') {
+    direction = 'reduce'
+    reason = signal.reason || '价格接近阻力位，注意减仓或止盈。'
+    score -= 1
+  } else if (signal?.reason) {
+    reason = signal.reason
+  }
+
+  if (stats) {
+    if (stats.winRate >= 60) score += 1
+    else if (stats.winRate < 45) score -= 1
+  }
+
+  if (hasGridBest) score += 0.5
+
+  if (direction === 'buy' && score <= 0) direction = 'buy_watch'
+  if (direction === 'sell' && score >= 0) direction = 'reduce'
+
+  const confidence = score >= 2 ? '高' : score <= -1 ? '低' : '中'
+  const actionTextMap = {
+    buy: '偏多买入',
+    buy_watch: '观察买点',
+    sell: '止损卖出',
+    reduce: '减仓止盈',
+    watch: '观望'
+  }
+
+  const hintParts = []
+  if (stats) {
+    hintParts.push(
+      `回测胜率 ${formatNumber(stats.winRate, 1)}%，总盈亏 ${formatNumber(stats.totalProfit, 2)}`
+    )
+  }
+  if (hasGridBest) {
+    hintParts.push('参数已存在网格最优解，优先按最优参数执行。')
+  }
+  if (signal?.support || signal?.resistance) {
+    hintParts.push(
+      `支撑 ${formatNumber(signal?.support)}，阻力 ${formatNumber(signal?.resistance)}`
+    )
+  }
+
+  return {
+    direction,
+    actionText: actionTextMap[direction] || actionTextMap.watch,
+    confidence,
+    reason,
+    hint: hintParts.join('；'),
+    lastClose: signal?.last_close ?? null,
+    stopLoss: signal?.stop_loss ?? null,
+    takeProfit: signal?.take_profit ?? null
+  }
+})
 
 const applyGridToBacktest = async () => {
   if (!gridSummary.value) return
@@ -799,7 +877,7 @@ const focusOrder = (order) => {
   const index = klineData.value.findIndex((item) => toDateInt(item.date) === dateInt)
   if (index < 0) return
   const total = klineData.value.length
-  const size = Math.max(60, Math.min(chartWindow.size || 160, total))
+  const size = Math.max(60, Math.min(chartWindow.size || 220, total))
   const to = Math.min(total - 1, index + Math.floor(size / 2))
   chartWindow.offset = Math.max(0, total - 1 - to)
   applyVisibleRange()
@@ -849,12 +927,13 @@ const ensureChart = () => {
   const width = klineContainer.value.clientWidth
   if (!width) return
   chartRef.value = createChart(klineContainer.value, {
-    height: 340,
+    height: 560,
     width,
     layout: {
       background: { color: '#ffffff' },
       textColor: '#1b1a18',
-      fontFamily: "Sora, 'Noto Sans SC', sans-serif"
+      fontFamily: "Sora, 'Noto Sans SC', sans-serif",
+      attributionLogo: false
     },
     grid: {
       vertLines: { color: 'rgba(27, 26, 24, 0.08)' },
@@ -873,10 +952,10 @@ const ensureChart = () => {
     }
   })
   candleSeries.value = chartRef.value.addCandlestickSeries({
-    upColor: '#1f7a4b',
-    downColor: '#b33a3a',
-    wickUpColor: '#1f7a4b',
-    wickDownColor: '#b33a3a',
+    upColor: '#c23531',
+    downColor: '#2f7d32',
+    wickUpColor: '#c23531',
+    wickDownColor: '#2f7d32',
     borderVisible: false
   })
   volumeSeries.value = chartRef.value.addHistogramSeries({
@@ -915,12 +994,13 @@ const ensureEquityChart = () => {
   const width = equityContainer.value.clientWidth
   if (!width) return
   equityChartRef.value = createChart(equityContainer.value, {
-    height: 220,
+    height: 280,
     width,
     layout: {
       background: { color: '#ffffff' },
       textColor: '#1b1a18',
-      fontFamily: "Sora, 'Noto Sans SC', sans-serif"
+      fontFamily: "Sora, 'Noto Sans SC', sans-serif",
+      attributionLogo: false
     },
     grid: {
       vertLines: { color: 'rgba(27, 26, 24, 0.08)' },
@@ -944,7 +1024,7 @@ const ensureEquityChart = () => {
 const applyVisibleRange = () => {
   if (!chartRef.value || !klineData.value.length) return
   const total = klineData.value.length
-  const size = Math.max(60, Math.min(chartWindow.size || 160, total))
+  const size = Math.max(60, Math.min(chartWindow.size || 220, total))
   const maxOffset = Math.max(0, total - size)
   if (chartWindow.offset > maxOffset) chartWindow.offset = maxOffset
   if (chartWindow.offset < 0) chartWindow.offset = 0
@@ -1159,8 +1239,8 @@ const updateChartData = () => {
         value: Number(item.volume ?? 0),
         color:
           Number(item.close ?? 0) >= Number(item.open ?? 0)
-            ? 'rgba(31, 122, 75, 0.4)'
-            : 'rgba(179, 58, 58, 0.4)'
+            ? 'rgba(194, 53, 49, 0.42)'
+            : 'rgba(47, 125, 50, 0.42)'
       }))
       .filter((item) => item.time)
   )
@@ -1171,8 +1251,15 @@ const updateChartData = () => {
 }
 
 const buildEquitySeries = () => {
-  const orders = filteredOrders.value || []
-  const rows = orders
+  const allOrders = backtestOrders.value || []
+  const symbolScoped = chartSymbol.value
+    ? allOrders.filter((item) => String(item.symbol || '').toLowerCase() === chartSymbol.value.toLowerCase())
+    : allOrders
+  const scopedClosedCount = symbolScoped.filter((item) => isClosedOrder(item)).length
+  const sourceOrders = scopedClosedCount ? symbolScoped : allOrders
+
+  const rows = sourceOrders
+    .filter((order) => isClosedOrder(order))
     .map((order) => {
       const time = toChartTime(order.sell_date || order.buy_date)
       return {
@@ -1180,13 +1267,25 @@ const buildEquitySeries = () => {
         profit: Number(resolveOrderProfit(order) || 0)
       }
     })
-    .filter((row) => row.time)
+    .filter((row) => row.time && Number.isFinite(row.profit))
     .sort((a, b) => String(a.time).localeCompare(String(b.time)))
-  let cumulative = 0
-  return rows.map((row) => {
-    cumulative += row.profit
-    return { time: row.time, value: Number(cumulative.toFixed(2)) }
+
+  if (!rows.length) return []
+
+  const dailyProfit = new Map()
+  rows.forEach((row) => {
+    dailyProfit.set(row.time, Number((dailyProfit.get(row.time) || 0) + row.profit))
   })
+
+  const points = []
+  let cumulative = 0
+  Array.from(dailyProfit.entries())
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+    .forEach(([time, profit]) => {
+      cumulative += Number(profit || 0)
+      points.push({ time, value: Number(cumulative.toFixed(2)) })
+    })
+  return points
 }
 
 const updateEquityChart = () => {
@@ -1203,8 +1302,8 @@ const updateEquityChart = () => {
 const shiftWindow = (direction) => {
   const data = klineData.value || []
   if (!data.length) return
-  const step = Math.max(10, Math.floor((chartWindow.size || 160) / 5))
-  const size = Math.max(60, Math.min(chartWindow.size || 160, data.length))
+  const step = Math.max(10, Math.floor((chartWindow.size || 220) / 5))
+  const size = Math.max(60, Math.min(chartWindow.size || 220, data.length))
   const maxOffset = Math.max(0, data.length - size)
   chartWindow.offset = Math.min(maxOffset, Math.max(0, chartWindow.offset + direction * step))
   applyVisibleRange()
@@ -1519,13 +1618,19 @@ const runGridSearch = async () => {
   const sellGrid = buildGridParamPayload(activeSellStrategy.value, gridSellParamLists)
   const buyStrategyList = parseStringList(gridForm.buy_strategies)
   const sellStrategyList = parseStringList(gridForm.sell_strategies)
+  const baseMarket = gridUseBacktestBase.value ? backtestForm.market : gridForm.market
+  const baseSymbols = gridUseBacktestBase.value ? backtestForm.symbols : gridForm.symbols
+  const baseCash = gridUseBacktestBase.value ? backtestForm.cash : gridForm.cash
+  const baseStart = gridUseBacktestBase.value ? backtestForm.start : gridForm.start
+  const baseEnd = gridUseBacktestBase.value ? backtestForm.end : gridForm.end
+  const baseNFolds = gridUseBacktestBase.value ? backtestForm.n_folds : gridForm.n_folds
   const job = await store.startGridSearch({
-    market: gridForm.market,
-    symbols: gridForm.symbols,
-    n_folds: gridForm.n_folds,
-    start: gridForm.start || undefined,
-    end: gridForm.end || undefined,
-    cash: gridForm.cash,
+    market: baseMarket,
+    symbols: baseSymbols,
+    n_folds: baseNFolds,
+    start: baseStart || undefined,
+    end: baseEnd || undefined,
+    cash: baseCash,
     buy_strategy: buyStrategyId.value,
     sell_strategy: sellStrategyId.value,
     buy_strategies: buyStrategyList.length ? buyStrategyList : undefined,

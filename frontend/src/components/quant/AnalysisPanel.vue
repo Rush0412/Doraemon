@@ -243,6 +243,7 @@
 
 <script setup>
 const formatNumber = (value) => {
+  if (value === null || value === undefined || value === '') return '-'
   const num = Number(value)
   if (!Number.isFinite(num)) return '-'
   return num.toFixed(2)
