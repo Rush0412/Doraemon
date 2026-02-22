@@ -12,6 +12,16 @@
       <div class="tool-form">
         <div class="form-grid">
           <div>
+            <label class="label">市场</label>
+            <select v-model="toolForm.market" class="select">
+              <option value="SH">SH (Shanghai)</option>
+              <option value="SZ">SZ (Shenzhen)</option>
+              <option value="300">300 (ChiNext)</option>
+              <option value="US">US</option>
+              <option value="HK">HK</option>
+            </select>
+          </div>
+          <div>
             <label class="label">工具类型</label>
             <select v-model="toolForm.tool" class="select">
               <option value="support_resistance">阻力/支撑位分析</option>
@@ -33,7 +43,7 @@
           </div>
           <div>
             <label class="label">标的列表</label>
-            <input v-model="toolForm.symbols" placeholder="sh600036, sz000001" />
+            <input v-model="toolForm.symbols" placeholder="600036, 000001" />
           </div>
           <div>
             <label class="label">回溯年数</label>
@@ -94,7 +104,7 @@
           <div class="form-grid">
             <div>
               <label class="label">对比基准</label>
-              <input v-model="toolOptions.benchmark" placeholder="sh000001" />
+              <input v-model="toolOptions.benchmark" placeholder="000001" />
             </div>
             <div>
               <label class="label">重采样</label>

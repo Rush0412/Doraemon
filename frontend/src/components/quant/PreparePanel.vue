@@ -62,10 +62,10 @@
           <tbody>
             <tr v-for="item in store.symbols" :key="`${item.market}-${item.symbol}`">
               <td class="mono">{{ displaySymbol(item) }}</td>
-              <td>{{ item.market }}</td>
+              <td>{{ displayMarket(item) }}</td>
               <td>{{ displayKind(item.kind) }}</td>
               <td>{{ item.name || '-' }}</td>
-              <td>{{ item.exchange || '-' }}</td>
+              <td>{{ displayExchange(item) }}</td>
               <td>{{ item.industry || '-' }}</td>
               <td>
                 <button class="btn-ghost" @click="toggleSymbol(item.symbol)">
@@ -101,7 +101,7 @@
         </div>
         <div class="selection-chips">
           <button v-for="symbol in selectedSymbols" :key="symbol" class="chip" @click="removeSymbol(symbol)">
-            {{ symbol }}
+            {{ formatSelectedSymbol(symbol) }}
             <span class="chip-close">×</span>
           </button>
         </div>
@@ -175,7 +175,7 @@
         <p class="muted">更新标的</p>
         <div v-if="selectedSymbols.length" class="selection-chips">
           <button v-for="symbol in selectedSymbols" :key="symbol" class="chip" @click="removeSymbol(symbol)">
-            {{ symbol }}
+            {{ formatSelectedSymbol(symbol) }}
             <span class="chip-close">×</span>
           </button>
         </div>
@@ -231,6 +231,9 @@ defineProps({
   selectPage: Function,
   invertPage: Function,
   displaySymbol: Function,
+  displayMarket: Function,
+  displayExchange: Function,
+  formatSelectedSymbol: Function,
   displayKind: Function,
   toggleSymbol: Function,
   isSelected: Function,

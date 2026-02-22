@@ -12,7 +12,7 @@
       <div class="form-grid">
         <div>
           <label class="label">标的列表</label>
-          <input v-model="backtestForm.symbols" placeholder="sh600036, sz000001" />
+          <input v-model="backtestForm.symbols" placeholder="600036, 300249" />
         </div>
         <div>
           <label class="label">初始资金</label>
@@ -95,6 +95,7 @@
         <button class="btn-primary" @click="runBacktest" :disabled="actionsBusy">启动回测</button>
         <button class="btn-secondary" @click="runStockSelect" :disabled="actionsBusy">独立选股</button>
         <button class="btn-secondary" @click="runClosedLoop" :disabled="actionsBusy">一键闭环</button>
+        <button class="btn-secondary" @click="runQuickAnalysis" :disabled="actionsBusy">&#37327;&#21270;&#24403;&#21069;&#26631;&#30340;</button>
         <span class="muted">回测完成后可导出 CSV</span>
       </div>
       <div v-if="backtestSummary" class="result-card">
@@ -131,7 +132,7 @@
             <tbody>
               <tr v-for="row in backtestTopSymbols" :key="`backtest-symbol-${row.rank}-${row.symbol}`">
                 <td class="mono">{{ row.rank }}</td>
-                <td class="mono">{{ row.symbol }}</td>
+                <td class="mono">{{ formatSelectedSymbol(row.symbol, backtestForm.market) }}</td>
                 <td class="mono">{{ formatNumber(row.win_rate, 1) }}%</td>
                 <td class="mono">{{ formatNumber(row.profit_sum) }}</td>
                 <td class="mono">{{ row.closed_orders }}</td>
@@ -159,7 +160,7 @@
             </thead>
             <tbody>
               <tr v-for="row in backtestActionableCandidates" :key="`backtest-action-${row.symbol}`">
-                <td class="mono">{{ row.symbol }}</td>
+                <td class="mono">{{ formatSelectedSymbol(row.symbol, backtestForm.market) }}</td>
                 <td>{{ row.action }}</td>
                 <td class="mono">{{ row.position_range }}</td>
                 <td class="mono">{{ formatNumber(row.win_rate, 1) }}%</td>
@@ -218,7 +219,7 @@
             <tbody>
               <tr v-for="row in stockSelectTopSymbols" :key="`select-${row.rank}-${row.symbol}`">
                 <td class="mono">{{ row.rank }}</td>
-                <td class="mono">{{ row.symbol }}</td>
+                <td class="mono">{{ formatSelectedSymbol(row.symbol, backtestForm.market) }}</td>
                 <td class="mono">{{ formatNumber(row.win_rate, 1) }}%</td>
                 <td class="mono">{{ formatNumber(row.profit_sum) }}</td>
                 <td class="mono">{{ formatNumber(row.sharpe, 2) }}</td>
@@ -248,7 +249,7 @@
             </thead>
             <tbody>
               <tr v-for="row in stockSelectActionableCandidates" :key="`select-action-${row.symbol}`">
-                <td class="mono">{{ row.symbol }}</td>
+                <td class="mono">{{ formatSelectedSymbol(row.symbol, backtestForm.market) }}</td>
                 <td>{{ row.action }}</td>
                 <td class="mono">{{ row.position_range }}</td>
                 <td class="mono">{{ formatNumber(row.stop_loss) }} / {{ formatNumber(row.take_profit) }}</td>
@@ -287,7 +288,7 @@
           <label class="label">展示标的</label>
           <select v-model="chartSymbolProxy" class="select">
             <option v-for="symbol in backtestSymbols" :key="symbol" :value="symbol">
-              {{ symbol }}
+              {{ formatSelectedSymbol(symbol, backtestForm.market) }}
             </option>
           </select>
           <label class="label">订单筛选</label>
@@ -589,7 +590,7 @@
           </div>
           <div>
             <p class="muted">标的</p>
-            <p class="mono">{{ backtestForm.symbols || '-' }}</p>
+            <p class="mono">{{ formatSymbolText(backtestForm.symbols, backtestForm.market) }}</p>
           </div>
           <div>
             <p class="muted">初始资金</p>
@@ -608,7 +609,7 @@
       <div class="form-grid">
         <div v-if="!gridUseBacktestBaseProxy">
           <label class="label">标的列表</label>
-          <input v-model="gridForm.symbols" placeholder="sh600036, sz000001" />
+          <input v-model="gridForm.symbols" placeholder="600036, 000001" />
         </div>
         <div v-if="!gridUseBacktestBaseProxy">
           <label class="label">初始资金</label>
@@ -807,7 +808,7 @@
             <tbody>
               <tr v-for="row in gridTopSymbols" :key="`grid-symbol-${row.rank}-${row.symbol}`">
                 <td class="mono">{{ row.rank }}</td>
-                <td class="mono">{{ row.symbol }}</td>
+                <td class="mono">{{ formatSelectedSymbol(row.symbol, backtestForm.market) }}</td>
                 <td class="mono">{{ formatNumber(row.win_rate, 1) }}%</td>
                 <td class="mono">{{ formatNumber(row.profit_sum) }}</td>
                 <td class="mono">{{ formatNumber(row.sharpe, 2) }}</td>
@@ -837,7 +838,7 @@
             </thead>
             <tbody>
               <tr v-for="row in gridActionableCandidates" :key="`grid-action-${row.symbol}`">
-                <td class="mono">{{ row.symbol }}</td>
+                <td class="mono">{{ formatSelectedSymbol(row.symbol, backtestForm.market) }}</td>
                 <td>{{ row.action }}</td>
                 <td class="mono">{{ row.position_range }}</td>
                 <td class="mono">{{ formatNumber(row.win_rate, 1) }}%</td>
@@ -965,6 +966,8 @@ const props = defineProps({
   applyGridNextSuggestions: Function,
   applySymbolToBacktest: Function,
   applySymbolToAnalysis: Function,
+  formatSymbolText: Function,
+  formatSelectedSymbol: Function,
   setKlineContainer: Function,
   setEquityContainer: Function
 })
@@ -1066,5 +1069,14 @@ const paramsBrief = (row) => {
   if (!merged.length) return '-'
   return merged.join(', ')
 }
+const runQuickAnalysis = () => {
+  const first = String(props.backtestForm?.symbols || '')
+    .split(/[\s,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)[0]
+  if (!first) return
+  props.applySymbolToAnalysis(first)
+}
+
 </script>
 

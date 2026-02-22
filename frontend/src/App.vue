@@ -4,13 +4,9 @@
       <div class="brand">
         <span class="brand-dot"></span>
         <div>
-          <p class="brand-title">Doraemon</p>
-          <p class="brand-sub">Quant Studio</p>
+          <p class="brand-title">量化工作台</p>
         </div>
       </div>
-      <nav class="nav">
-        <router-link to="/" class="nav-link">Quant</router-link>
-      </nav>
     </header>
     <main class="app-main">
       <router-view />
