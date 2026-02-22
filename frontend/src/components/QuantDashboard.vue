@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="quant-shell">
     <section class="hero">
       <div class="hero-head">
@@ -135,8 +135,6 @@
       :kline-data="klineData"
       :equity-data="equityData"
       :operation-suggestion="operationSuggestion"
-      v-model:advice-profile="adviceProfile"
-      :advice-templates="adviceTemplates"
       :filtered-orders="filteredOrders"
       :paged-orders="pagedOrders"
       v-model:order-page="orderPage"
@@ -721,10 +719,11 @@ const analysisText = computed(() =>
   analysisResult.value ? JSON.stringify(analysisResult.value, null, 2) : ''
 )
 
-const { adviceProfile, adviceTemplates, operationSuggestion } = useOperationSuggestion({
+const { operationSuggestion } = useOperationSuggestion({
   analysisResult,
   backtestTradeStats,
   gridSummary,
+  gridDiagnostics,
   gridTopRuns
 })
 
@@ -744,9 +743,7 @@ const { settingsReady, restoreQuantSettings, scheduleSaveQuantSettings, clearSet
   gridBuyParamLists,
   gridSellParamLists,
   gridUseBacktestBase,
-  gridExploreAllStrategies,
-  adviceProfile,
-  adviceTemplates
+  gridExploreAllStrategies
 })
 
 const applyGridCandidateToBacktest = async (candidate) => {
@@ -953,8 +950,7 @@ watch(
     buyStrategyId.value,
     sellStrategyId.value,
     gridUseBacktestBase.value,
-    gridExploreAllStrategies.value,
-    adviceProfile.value,
+    gridExploreAllStrategies.value
   ],
   () => {
     scheduleSaveQuantSettings()
@@ -969,7 +965,6 @@ watch(buyStrategyParams, scheduleSaveQuantSettings, { deep: true })
 watch(sellStrategyParams, scheduleSaveQuantSettings, { deep: true })
 watch(gridBuyParamLists, scheduleSaveQuantSettings, { deep: true })
 watch(gridSellParamLists, scheduleSaveQuantSettings, { deep: true })
-watch(adviceTemplates, scheduleSaveQuantSettings, { deep: true })
 
 const activeParamsText = computed(() =>
   store.activeJob?.params ? JSON.stringify(store.activeJob.params, null, 2) : ''
@@ -1289,12 +1284,58 @@ const runStockSelect = async () => {
   return job
 }
 
+const _normalizePayload = (value) => {
+  if (Array.isArray(value)) return value.map((item) => _normalizePayload(item))
+  if (value && typeof value === 'object') {
+    return Object.keys(value)
+      .sort()
+      .reduce((acc, key) => {
+        const v = value[key]
+        if (v !== undefined) acc[key] = _normalizePayload(v)
+        return acc
+      }, {})
+  }
+  return value
+}
+
+const _samePayload = (a, b) => JSON.stringify(_normalizePayload(a || {})) === JSON.stringify(_normalizePayload(b || {}))
+
+const _parseJobTime = (job) => {
+  const v = job?.updated_at || job?.finished_at || job?.created_at
+  if (!v) return 0
+  const ts = new Date(v).getTime()
+  return Number.isFinite(ts) ? ts : 0
+}
+
+const _findReusableSucceededJob = (type, payload, maxAgeMs = 15 * 60 * 1000) => {
+  const now = Date.now()
+  const rows = Array.isArray(store.jobs) ? [...store.jobs] : []
+  rows.sort((a, b) => _parseJobTime(b) - _parseJobTime(a))
+  return (
+    rows.find((job) => {
+      if (!job || job.type !== type || job.status !== 'succeeded') return false
+      const ageMs = now - _parseJobTime(job)
+      if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > maxAgeMs) return false
+      return _samePayload(job.params, payload)
+    }) || null
+  )
+}
+
 const runClosedLoop = async () => {
   flowRunning.value = true
   klineError.value = ''
   try {
-    const selectQueued = await store.startStockSelect(buildStockSelectPayload())
-    const selectDone = await waitForJobDone(selectQueued.id)
+    await store.fetchJobs(120)
+    const selectPayload = buildStockSelectPayload()
+    const reusableSelect = _findReusableSucceededJob('stock_select', selectPayload)
+    let selectDone = null
+    if (reusableSelect) {
+      await store.fetchJob(reusableSelect.id)
+      selectDone = store.activeJob
+    } else {
+      const selectQueued = await store.startStockSelect(selectPayload)
+      selectDone = await waitForJobDone(selectQueued.id)
+    }
     const selectResult = selectDone?.result || {}
     const topSymbols = Array.isArray(selectResult.top_symbols)
       ? selectResult.top_symbols.map((item) => String(item.symbol || '').trim()).filter(Boolean)
@@ -1307,15 +1348,21 @@ const runClosedLoop = async () => {
     backtestForm.symbols = normalizeSymbolsInputForUi(picked.join(', '))
     chartSymbol.value = picked[0]
 
-    const backtestQueued = await store.startBacktest(buildBacktestPayload())
-    await waitForJobDone(backtestQueued.id)
+    const backtestPayload = buildBacktestPayload()
+    const reusableBacktest = _findReusableSucceededJob('backtest', backtestPayload)
+    if (reusableBacktest) {
+      await store.fetchJob(reusableBacktest.id)
+    } else {
+      const backtestQueued = await store.startBacktest(backtestPayload)
+      await waitForJobDone(backtestQueued.id)
+    }
 
     toolForm.market = backtestForm.market
     toolForm.tool = 'support_resistance'
     toolForm.symbols = normalizeSymbolsInputForUi(picked[0])
     toolForm.start = backtestForm.start || ''
     toolForm.end = backtestForm.end || ''
-    const analysisQueued = await store.startQuantTool({
+    const analysisPayload = {
       market: toolForm.market,
       tool: toolForm.tool,
       symbols: toolForm.symbols,
@@ -1324,8 +1371,14 @@ const runClosedLoop = async () => {
       end: toolForm.end || undefined,
       limit: toolForm.limit,
       options: buildToolOptions()
-    })
-    await waitForJobDone(analysisQueued.id)
+    }
+    const reusableAnalysis = _findReusableSucceededJob('analysis', analysisPayload)
+    if (reusableAnalysis) {
+      await store.fetchJob(reusableAnalysis.id)
+    } else {
+      const analysisQueued = await store.startQuantTool(analysisPayload)
+      await waitForJobDone(analysisQueued.id)
+    }
 
     activeTab.value = 'strategy'
     await nextTick()

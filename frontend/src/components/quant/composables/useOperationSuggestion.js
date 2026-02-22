@@ -1,4 +1,14 @@
-import { computed, reactive, ref } from 'vue'
+import { computed } from 'vue'
+
+const toNumber = (value, fallback = null) => {
+  const num = Number(value)
+  return Number.isFinite(num) ? num : fallback
+}
+
+const clamp = (value, min = 0, max = 1) => {
+  const num = toNumber(value, min)
+  return Math.min(max, Math.max(min, num))
+}
 
 const formatNumber = (value, digits = 2) => {
   if (value === null || value === undefined) return '-'
@@ -7,214 +17,272 @@ const formatNumber = (value, digits = 2) => {
   return num.toFixed(digits)
 }
 
-const clamp01 = (value, fallback = 0) => {
-  const num = Number(value)
-  if (!Number.isFinite(num)) return fallback
-  return Math.max(0, Math.min(1, num))
+const splitRatios = (values, fallback = [0.45, 0.35, 0.2]) => {
+  const nums = values.map((item) => (Number.isFinite(Number(item)) ? Math.max(Number(item), 0) : 0))
+  const sum = nums.reduce((acc, item) => acc + item, 0)
+  if (sum <= 0) return fallback
+  return nums.map((item) => item / sum)
 }
 
-const normalizeTriplet = (a, b, c, defaults = [0.4, 0.4, 0.2]) => {
-  const values = [Number(a), Number(b), Number(c)].map((item) => (Number.isFinite(item) ? Math.max(item, 0) : 0))
-  const sum = values.reduce((acc, item) => acc + item, 0)
-  if (sum <= 0) return defaults
-  return values.map((item) => item / sum)
+const signalAssessment = (signal) => {
+  const action = signal?.action
+  if (action === 'breakout') {
+    return { score: 2, direction: 'buy', reason: signal?.reason || '价格突破阻力位，趋势转强。' }
+  }
+  if (action === 'near_support') {
+    return { score: 1, direction: 'buy_watch', reason: signal?.reason || '价格接近支撑位，可小仓试探。' }
+  }
+  if (action === 'near_resistance') {
+    return { score: -1, direction: 'reduce', reason: signal?.reason || '价格接近阻力位，优先减仓。' }
+  }
+  if (action === 'breakdown') {
+    return { score: -2, direction: 'sell', reason: signal?.reason || '价格跌破支撑位，优先风控。' }
+  }
+  return { score: 0, direction: 'watch', reason: signal?.reason || '暂无明确趋势信号，先观察。' }
+}
+
+const backtestAssessment = (stats) => {
+  if (!stats) return { score: -0.2, notes: ['缺少回测统计，建议先执行回测再决策。'] }
+  const notes = []
+  let score = 0
+  const winRate = toNumber(stats.winRate, 0)
+  const totalProfit = toNumber(stats.totalProfit, 0)
+  const totalTrades = toNumber(stats.total, 0)
+
+  if (winRate >= 62) score += 1.0
+  else if (winRate >= 55) score += 0.5
+  else if (winRate < 45) score -= 0.8
+
+  if (totalProfit > 0) score += 0.4
+  else if (totalProfit < 0) score -= 0.4
+
+  if (totalTrades < 15) {
+    score -= 0.3
+    notes.push('成交样本偏少，统计稳定性不足。')
+  }
+
+  notes.push(`回测胜率 ${formatNumber(winRate, 1)}%，累计盈亏 ${formatNumber(totalProfit, 2)}。`)
+  return { score, notes }
+}
+
+const gridAssessment = (summary, diagnostics, topRuns) => {
+  const notes = []
+  let score = 0
+
+  if (summary) {
+    const winRate = toNumber(summary.validation_win_rate ?? summary.win_rate, null)
+    const drawdown = toNumber(summary.validation_max_drawdown ?? summary.max_drawdown, null)
+    if (winRate !== null) {
+      if (winRate >= 60) score += 0.4
+      else if (winRate < 50) score -= 0.2
+    }
+    if (drawdown !== null) {
+      if (drawdown <= 0.12) score += 0.3
+      else if (drawdown >= 0.22) score -= 0.3
+    }
+  }
+
+  if (diagnostics) {
+    const tested = toNumber(diagnostics.tested_runs, 0)
+    const total = toNumber(diagnostics.total_candidates, 0)
+    if (total > 0) {
+      const coverage = tested / total
+      if (coverage >= 0.95) score += 0.2
+      else if (coverage < 0.7) score -= 0.2
+      notes.push(`参数覆盖率 ${(coverage * 100).toFixed(0)}%（${tested}/${total}）。`)
+    }
+  }
+
+  if (Array.isArray(topRuns) && topRuns.length) {
+    score += 0.2
+    const best = topRuns[0]
+    if (best?.buy_strategy || best?.sell_strategy) {
+      notes.push(`当前最优组合：${best.buy_strategy || '-'} / ${best.sell_strategy || '-'}`)
+    }
+  }
+
+  return { score, notes }
+}
+
+const buildEvolutionSteps = ({ stats, gridSummary, gridTopRuns }) => {
+  const steps = []
+
+  if (Array.isArray(gridTopRuns) && gridTopRuns.length) {
+    const best = gridTopRuns[0]
+    steps.push(`围绕最优策略 ${best.buy_strategy || '-'} / ${best.sell_strategy || '-'} 做 ±20% 参数扩展寻优。`)
+  } else {
+    steps.push('先做参数交叉验证，拿到前 10 组合后再做二轮收敛。')
+  }
+
+  const trades = toNumber(stats?.total, 0)
+  if (trades < 20) {
+    steps.push('扩大回测区间到 2-3 年，或增加候选标的，提升样本有效性。')
+  }
+
+  const winRate = toNumber(stats?.winRate, 0)
+  if (winRate > 0 && winRate < 52) {
+    steps.push('下调仓位上限并收紧止损倍数，优先修复回撤后再追求收益。')
+  } else if (winRate >= 60) {
+    steps.push('保持止损不变，优先优化止盈分批比例，提高盈亏比。')
+  }
+
+  if (!gridSummary) {
+    steps.push('当前缺少寻优结论，建议先运行“参数交叉验证”再执行一键闭环。')
+  }
+
+  return steps
 }
 
 export const useOperationSuggestion = ({
   analysisResult,
   backtestTradeStats,
   gridSummary,
+  gridDiagnostics,
   gridTopRuns
 }) => {
-  const adviceProfile = ref('balanced')
-  const adviceTemplates = reactive({
-    conservative: {
-      label: '稳健',
-      position: {
-        buyHigh: 0.45,
-        buyMid: 0.3,
-        buyWatchHigh: 0.28,
-        buyWatchMid: 0.18,
-        reduce: 0.15,
-        watch: 0.1
-      },
-      entry: { first: 0.45, pullback: 0.35, breakout: 0.2 },
-      takeProfit: { tp1: 0.3, tp2: 0.4, tp3: 0.3 },
-      trailStopPct: 0.04
-    },
-    balanced: {
-      label: '平衡',
-      position: {
-        buyHigh: 0.6,
-        buyMid: 0.45,
-        buyWatchHigh: 0.4,
-        buyWatchMid: 0.25,
-        reduce: 0.2,
-        watch: 0.12
-      },
-      entry: { first: 0.5, pullback: 0.3, breakout: 0.2 },
-      takeProfit: { tp1: 0.4, tp2: 0.4, tp3: 0.2 },
-      trailStopPct: 0.05
-    },
-    aggressive: {
-      label: '激进',
-      position: {
-        buyHigh: 0.75,
-        buyMid: 0.6,
-        buyWatchHigh: 0.5,
-        buyWatchMid: 0.35,
-        reduce: 0.25,
-        watch: 0.15
-      },
-      entry: { first: 0.55, pullback: 0.25, breakout: 0.2 },
-      takeProfit: { tp1: 0.35, tp2: 0.35, tp3: 0.3 },
-      trailStopPct: 0.06
-    }
-  })
-
-  const currentAdviceTemplate = computed(() => adviceTemplates[adviceProfile.value] || adviceTemplates.balanced)
-
   const operationSuggestion = computed(() => {
     const signal = analysisResult.value?.signal || null
-    const stats = backtestTradeStats.value
-    const hasGridBest = !!gridSummary.value || gridTopRuns.value.length > 0
-    const tpl = currentAdviceTemplate.value
+    const stats = backtestTradeStats.value || null
 
-    let direction = 'watch'
-    let reason = '暂无明确趋势信号，建议等待突破或支撑确认。'
-    let score = 0
+    const signalPart = signalAssessment(signal)
+    const backtestPart = backtestAssessment(stats)
+    const gridPart = gridAssessment(gridSummary.value, gridDiagnostics?.value, gridTopRuns.value)
 
-    if (signal?.action === 'breakout') {
-      direction = 'buy'
-      reason = signal.reason || '价格向上突破阻力位。'
-      score += 2
-    } else if (signal?.action === 'near_support') {
-      direction = 'buy_watch'
-      reason = signal.reason || '价格接近支撑位，等待确认后分批加仓。'
-      score += 1
-    } else if (signal?.action === 'breakdown') {
-      direction = 'sell'
-      reason = signal.reason || '价格跌破支撑位。'
-      score -= 2
-    } else if (signal?.action === 'near_resistance') {
-      direction = 'reduce'
-      reason = signal.reason || '价格接近阻力位，建议减仓保护收益。'
-      score -= 1
-    } else if (signal?.reason) {
-      reason = signal.reason
+    const totalScore = signalPart.score * 0.55 + backtestPart.score * 0.3 + gridPart.score * 0.15
+
+    let confidence = '中'
+    if (totalScore >= 1.3) confidence = '高'
+    else if (totalScore <= -0.6) confidence = '低'
+
+    let direction = signalPart.direction
+    if (direction === 'watch') {
+      if (totalScore >= 0.8) direction = 'buy_watch'
+      else if (totalScore <= -0.8) direction = 'reduce'
+    }
+    if (direction === 'buy' && totalScore < 0.35) direction = 'buy_watch'
+    if (direction === 'sell' && totalScore > -0.3) direction = 'reduce'
+
+    let modeLabel = '观察等待'
+    if (direction === 'buy' && confidence === '高') modeLabel = '主动进攻'
+    else if (direction === 'buy' || direction === 'buy_watch') modeLabel = '试探进场'
+    else if (direction === 'reduce' || direction === 'sell') modeLabel = '防守风控'
+
+    let positionPct = 0.12
+    if (direction === 'buy') positionPct = confidence === '高' ? 0.68 : 0.52
+    else if (direction === 'buy_watch') positionPct = confidence === '高' ? 0.38 : 0.26
+    else if (direction === 'reduce') positionPct = 0.15
+    else if (direction === 'sell') positionPct = 0
+
+    const winRate = toNumber(stats?.winRate, 0)
+    if (winRate >= 65) positionPct = Math.min(0.8, positionPct + 0.06)
+    if (winRate > 0 && winRate < 45) positionPct = Math.max(0, positionPct - 0.1)
+
+    const lastClose = toNumber(signal?.last_close, null)
+    const support = toNumber(signal?.support, null)
+    const resistance = toNumber(signal?.resistance, null)
+
+    let stopLoss = toNumber(signal?.stop_loss, null)
+    let takeProfit = toNumber(signal?.take_profit, null)
+
+    if (lastClose !== null) {
+      if (stopLoss === null) {
+        stopLoss = direction === 'sell' ? Number((lastClose * 1.02).toFixed(2)) : Number((lastClose * 0.95).toFixed(2))
+      }
+      const risk = Math.max(0.01, Math.abs(lastClose - stopLoss))
+      if (takeProfit === null) {
+        const rr = confidence === '高' ? 2.8 : 2.2
+        takeProfit = Number((lastClose + risk * rr).toFixed(2))
+      }
     }
 
-    if (stats) {
-      if (stats.winRate >= 60) score += 1
-      else if (stats.winRate < 45) score -= 1
-    }
-    if (hasGridBest) score += 0.5
+    const tpDelta = lastClose !== null && takeProfit !== null ? Math.max(0, takeProfit - lastClose) : null
+    const [entry1, entry2, entry3] = splitRatios(confidence === '高' ? [0.4, 0.35, 0.25] : [0.5, 0.3, 0.2])
+    const [tp1Ratio, tp2Ratio, tp3Ratio] = splitRatios(confidence === '高' ? [0.35, 0.35, 0.3] : [0.4, 0.35, 0.25])
 
-    if (direction === 'buy' && score <= 0) direction = 'buy_watch'
-    if (direction === 'sell' && score >= 0) direction = 'reduce'
+    const tranchePlan =
+      direction === 'buy' || direction === 'buy_watch'
+        ? [
+            { label: '首笔建仓', ratio: entry1, trigger: '现价附近先建立试探仓。' },
+            {
+              label: '回踩加仓',
+              ratio: entry2,
+              trigger: support !== null ? `回踩 ${formatNumber(support)} 附近不破再加仓。` : '回踩短支撑不破时加仓。'
+            },
+            {
+              label: '突破加仓',
+              ratio: entry3,
+              trigger: resistance !== null ? `放量突破 ${formatNumber(resistance)} 后加仓。` : '突破近端压力位后加仓。'
+            }
+          ]
+        : [
+            { label: '风险处理', ratio: 1, trigger: direction === 'sell' ? '优先清仓，停止新增仓位。' : '先降仓位，等待信号恢复。' }
+          ]
 
-    const confidence = score >= 2 ? 'High' : score <= -1 ? 'Low' : 'Medium'
-
-    let positionPct = clamp01(tpl.position.watch, 0.1)
-    if (direction === 'buy') {
-      positionPct = confidence === 'High' ? clamp01(tpl.position.buyHigh, 0.6) : clamp01(tpl.position.buyMid, 0.45)
-    } else if (direction === 'buy_watch') {
-      positionPct =
-        confidence === 'High' ? clamp01(tpl.position.buyWatchHigh, 0.4) : clamp01(tpl.position.buyWatchMid, 0.25)
-    } else if (direction === 'reduce') {
-      positionPct = clamp01(tpl.position.reduce, 0.2)
-    } else if (direction === 'sell') {
-      positionPct = 0
-    }
-
-    if (stats?.winRate && stats.winRate < 45) positionPct = Math.max(0, positionPct - 0.1)
-    if (stats?.winRate && stats.winRate > 65) positionPct = Math.min(0.85, positionPct + 0.1)
-
-    const stopLoss = signal?.stop_loss ?? null
-    const takeProfit = signal?.take_profit ?? null
-    const lastClose = signal?.last_close ?? null
-    if (lastClose && stopLoss && Number(stopLoss) >= Number(lastClose)) {
-      positionPct = Math.min(positionPct, 0.15)
-    }
-
-    const delta =
-      Number.isFinite(Number(takeProfit)) && Number.isFinite(Number(lastClose))
-        ? Number(takeProfit) - Number(lastClose)
-        : null
-    const tp1Price =
-      Number.isFinite(delta) && delta > 0 && Number.isFinite(Number(lastClose))
-        ? Number((Number(lastClose) + delta * 0.5).toFixed(2))
-        : takeProfit
-    const tp2Price = Number.isFinite(Number(takeProfit)) ? Number(Number(takeProfit).toFixed(2)) : null
-    const tp3Price =
-      Number.isFinite(delta) && delta > 0 && Number.isFinite(Number(takeProfit))
-        ? Number((Number(takeProfit) + delta * 0.5).toFixed(2))
-        : null
-
-    const [entry1, entry2, entry3] = normalizeTriplet(tpl.entry.first, tpl.entry.pullback, tpl.entry.breakout, [0.5, 0.3, 0.2])
-    const [tp1Ratio, tp2Ratio, tp3Ratio] = normalizeTriplet(tpl.takeProfit.tp1, tpl.takeProfit.tp2, tpl.takeProfit.tp3, [0.4, 0.4, 0.2])
-
-    const hintParts = []
-    if (stats) {
-      hintParts.push(`回测胜率 ${formatNumber(stats.winRate, 1)}%，累计盈亏 ${formatNumber(stats.totalProfit, 2)}`)
-    }
-    if (hasGridBest) {
-      hintParts.push('已获得寻优组合，建议先对重点标的做二次回测后再实盘。')
-    }
-    if (signal?.support || signal?.resistance) {
-      hintParts.push(`支撑位 ${formatNumber(signal?.support)}，阻力位 ${formatNumber(signal?.resistance)}`)
-    }
+    const takeProfitPlan =
+      direction === 'buy' || direction === 'buy_watch'
+        ? [
+            {
+              label: 'TP1',
+              ratio: tp1Ratio,
+              target: tpDelta !== null && lastClose !== null ? Number((lastClose + tpDelta * 0.5).toFixed(2)) : takeProfit
+            },
+            { label: 'TP2', ratio: tp2Ratio, target: takeProfit },
+            {
+              label: 'TP3',
+              ratio: tp3Ratio,
+              target: tpDelta !== null && lastClose !== null ? Number((lastClose + tpDelta * 1.4).toFixed(2)) : null
+            }
+          ]
+        : [
+            { label: '减仓线', ratio: 0.5, target: resistance },
+            { label: '退出线', ratio: 0.5, target: stopLoss }
+          ]
 
     const actionTextMap = {
       buy: '买入 / 加仓',
-      buy_watch: '观察待买',
-      sell: '止损 / 清仓',
-      reduce: '减仓',
+      buy_watch: '观察后试探买入',
+      reduce: '减仓防守',
+      sell: '止损退出',
       watch: '观望'
+    }
+
+    const hintParts = [...backtestPart.notes, ...gridPart.notes]
+    if (support !== null || resistance !== null) {
+      hintParts.push(`关键位：支撑 ${formatNumber(support)}，阻力 ${formatNumber(resistance)}。`)
     }
 
     return {
       direction,
+      modeLabel,
       actionText: actionTextMap[direction] || actionTextMap.watch,
       confidence,
-      reason,
-      hint: hintParts.join('；'),
+      reason: signalPart.reason,
+      hint: hintParts.filter(Boolean).join(' '),
       lastClose,
+      support,
+      resistance,
       stopLoss,
       takeProfit,
-      positionPct,
-      positionText: `${Math.round(positionPct * 100)}%`,
-      profileKey: adviceProfile.value,
-      profileLabel: tpl.label,
-      tranchePlan:
-        direction === 'buy' || direction === 'buy_watch'
-          ? [
-              { label: '首批', ratio: entry1, trigger: '当前价附近先建第一笔仓位' },
-              { label: '回踩加仓', ratio: entry2, trigger: '回踩支撑不破时加仓' },
-              { label: '突破加仓', ratio: entry3, trigger: '突破确认后追加仓位' }
-            ]
-          : [{ label: '防守', ratio: 1, trigger: '优先降低风险敞口' }],
-      takeProfitPlan:
-        direction === 'buy' || direction === 'buy_watch'
-          ? [
-              { label: 'TP1', ratio: tp1Ratio, target: tp1Price },
-              { label: 'TP2', ratio: tp2Ratio, target: tp2Price },
-              { label: 'TP3', ratio: tp3Ratio, target: tp3Price }
-            ]
-          : [
-              { label: '减仓线', ratio: 0.5, target: signal?.resistance ?? null },
-              { label: '退出线', ratio: 0.5, target: stopLoss }
-            ],
+      positionPct: clamp(positionPct, 0, 0.85),
+      positionText: `${Math.round(clamp(positionPct, 0, 0.85) * 100)}%`,
+      tranchePlan,
+      takeProfitPlan,
       riskRule: {
         hardStop: stopLoss,
-        trailStopPct: clamp01(tpl.trailStopPct, 0.05)
-      }
+        trailStopPct: direction === 'buy' && confidence === '高' ? 0.06 : 0.05
+      },
+      evolutionSteps: buildEvolutionSteps({ stats, gridSummary: gridSummary.value, gridTopRuns: gridTopRuns.value }),
+      workflowSteps: [
+        '1. 独立选股：筛出前 10 只候选。',
+        '2. 回测验证：验证候选在当前策略下的胜率与回撤。',
+        '3. 量化分析：提取支撑/阻力与止损止盈位。',
+        '4. 执行建议：按分批建仓与分批止盈规则执行。',
+        '5. 结果复盘：将最新结果用于下一轮参数寻优。'
+      ]
     }
   })
 
   return {
-    adviceProfile,
-    adviceTemplates,
     operationSuggestion
   }
 }

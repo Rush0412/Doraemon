@@ -1,7 +1,7 @@
 import { nextTick, ref } from 'vue'
 
 const SETTINGS_KEY = 'doraemon_quant_settings_v1'
-const SETTINGS_SCHEMA_VERSION = 2
+const SETTINGS_SCHEMA_VERSION = 3
 
 const plainObject = (value) => {
   try {
@@ -9,28 +9,6 @@ const plainObject = (value) => {
   } catch {
     return {}
   }
-}
-
-const restoreAdviceTemplates = (payload, adviceTemplates) => {
-  if (!payload || typeof payload !== 'object') return
-  ;['conservative', 'balanced', 'aggressive'].forEach((key) => {
-    const source = payload[key]
-    const target = adviceTemplates[key]
-    if (!source || !target) return
-    if (typeof source.label === 'string' && source.label.trim()) target.label = source.label
-    if (source.position && typeof source.position === 'object') {
-      Object.assign(target.position, source.position)
-    }
-    if (source.entry && typeof source.entry === 'object') {
-      Object.assign(target.entry, source.entry)
-    }
-    if (source.takeProfit && typeof source.takeProfit === 'object') {
-      Object.assign(target.takeProfit, source.takeProfit)
-    }
-    if (source.trailStopPct !== undefined) {
-      target.trailStopPct = Number(source.trailStopPct)
-    }
-  })
 }
 
 export const useQuantSettings = ({
@@ -49,9 +27,7 @@ export const useQuantSettings = ({
   gridBuyParamLists,
   gridSellParamLists,
   gridUseBacktestBase,
-  gridExploreAllStrategies,
-  adviceProfile,
-  adviceTemplates
+  gridExploreAllStrategies
 }) => {
   const settingsReady = ref(false)
   let settingsSaveTimer = null
@@ -75,9 +51,7 @@ export const useQuantSettings = ({
       gridBuyParamLists: plainObject(gridBuyParamLists),
       gridSellParamLists: plainObject(gridSellParamLists),
       gridUseBacktestBase: !!gridUseBacktestBase.value,
-      gridExploreAllStrategies: !!gridExploreAllStrategies.value,
-      adviceProfile: adviceProfile.value,
-      adviceTemplates: plainObject(adviceTemplates),
+      gridExploreAllStrategies: !!gridExploreAllStrategies.value
     }
     try {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(snapshot))
@@ -115,7 +89,6 @@ export const useQuantSettings = ({
       if (!Number.isFinite(restoredMaxRuns) || restoredMaxRuns <= 0) {
         gridForm.max_runs = 50
       } else if (settingsVersion < SETTINGS_SCHEMA_VERSION && restoredMaxRuns === 30) {
-        // Migrate legacy cached default (30) to new default (50).
         gridForm.max_runs = 50
       } else {
         gridForm.max_runs = restoredMaxRuns
@@ -143,10 +116,6 @@ export const useQuantSettings = ({
       if (snapshot.gridExploreAllStrategies !== undefined) {
         gridExploreAllStrategies.value = !!snapshot.gridExploreAllStrategies
       }
-      if (typeof snapshot.adviceProfile === 'string' && snapshot.adviceProfile.trim()) {
-        adviceProfile.value = snapshot.adviceProfile
-      }
-      restoreAdviceTemplates(snapshot.adviceTemplates, adviceTemplates)
       await nextTick()
       if (snapshot.buyStrategyParams && typeof snapshot.buyStrategyParams === 'object') {
         Object.assign(buyStrategyParams, snapshot.buyStrategyParams)

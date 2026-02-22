@@ -338,84 +338,7 @@
         </div>
         <div v-if="operationSuggestion" class="result-card advice-card">
           <h3>当日操作建议</h3>
-          <div class="toolbar advice-profile-toolbar">
-            <label class="label">风险模板</label>
-            <select v-model="adviceProfileProxy" class="select">
-              <option v-for="item in adviceProfileOptions" :key="item.key" :value="item.key">
-                {{ item.label }}
-              </option>
-            </select>
-            <span class="muted">可手动调整仓位、建仓比例、止盈比例、移动止损</span>
-          </div>
-          <div v-if="adviceTemplate" class="info-card advice-template-card">
-            <p class="muted">模板参数（当前档位）</p>
-            <div class="form-grid">
-              <div>
-                <label class="label">强信号买入仓位</label>
-                <input v-model.number="adviceTemplate.position.buyHigh" type="number" min="0" max="1" step="0.05" />
-              </div>
-              <div>
-                <label class="label">中信号买入仓位</label>
-                <input v-model.number="adviceTemplate.position.buyMid" type="number" min="0" max="1" step="0.05" />
-              </div>
-              <div>
-                <label class="label">观察买入(强)仓位</label>
-                <input
-                  v-model.number="adviceTemplate.position.buyWatchHigh"
-                  type="number"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                />
-              </div>
-              <div>
-                <label class="label">观察买入(中)仓位</label>
-                <input
-                  v-model.number="adviceTemplate.position.buyWatchMid"
-                  type="number"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                />
-              </div>
-              <div>
-                <label class="label">减仓比例</label>
-                <input v-model.number="adviceTemplate.position.reduce" type="number" min="0" max="1" step="0.05" />
-              </div>
-              <div>
-                <label class="label">观望仓位</label>
-                <input v-model.number="adviceTemplate.position.watch" type="number" min="0" max="1" step="0.05" />
-              </div>
-              <div>
-                <label class="label">建仓一批比例</label>
-                <input v-model.number="adviceTemplate.entry.first" type="number" min="0" max="1" step="0.05" />
-              </div>
-              <div>
-                <label class="label">回踩加仓比例</label>
-                <input v-model.number="adviceTemplate.entry.pullback" type="number" min="0" max="1" step="0.05" />
-              </div>
-              <div>
-                <label class="label">突破加仓比例</label>
-                <input v-model.number="adviceTemplate.entry.breakout" type="number" min="0" max="1" step="0.05" />
-              </div>
-              <div>
-                <label class="label">止盈一批比例</label>
-                <input v-model.number="adviceTemplate.takeProfit.tp1" type="number" min="0" max="1" step="0.05" />
-              </div>
-              <div>
-                <label class="label">止盈二批比例</label>
-                <input v-model.number="adviceTemplate.takeProfit.tp2" type="number" min="0" max="1" step="0.05" />
-              </div>
-              <div>
-                <label class="label">止盈三批比例</label>
-                <input v-model.number="adviceTemplate.takeProfit.tp3" type="number" min="0" max="1" step="0.05" />
-              </div>
-              <div>
-                <label class="label">移动止损比例</label>
-                <input v-model.number="adviceTemplate.trailStopPct" type="number" min="0" max="1" step="0.01" />
-              </div>
-            </div>
-          </div>
+          <p class="muted">建议已按当前信号、回测质量和参数寻优结果动态生成。</p>
           <div class="result-grid">
             <div>
               <p class="muted">建议动作</p>
@@ -432,7 +355,7 @@
             <div>
               <p class="muted">建议仓位</p>
               <p class="metric-value">{{ operationSuggestion.positionText }}</p>
-              <p class="muted">模板：{{ operationSuggestion.profileLabel || operationSuggestion.profileKey }}</p>
+              <p class="muted">执行模式：{{ operationSuggestion.modeLabel || "-" }}</p>
             </div>
             <div>
               <p class="muted">止损 / 止盈</p>
@@ -487,6 +410,18 @@
             <p class="muted">
               硬止损：{{ formatNumber(operationSuggestion.riskRule?.hardStop) }}，
               移动止损：{{ formatNumber((operationSuggestion.riskRule?.trailStopPct || 0) * 100, 0) }}%
+            </p>
+          </div>
+          <div class="info-card" v-if="operationSuggestion.evolutionSteps?.length">
+            <p class="muted">参数进化建议</p>
+            <p v-for="(item, idx) in operationSuggestion.evolutionSteps" :key="`evolve-${idx}`" class="muted">
+              {{ idx + 1 }}. {{ item }}
+            </p>
+          </div>
+          <div class="info-card" v-if="operationSuggestion.workflowSteps?.length">
+            <p class="muted">闭环执行流程</p>
+            <p v-for="(item, idx) in operationSuggestion.workflowSteps" :key="`flow-${idx}`" class="muted">
+              {{ item }}
             </p>
           </div>
         </div>
@@ -936,8 +871,6 @@ const props = defineProps({
   klineData: Array,
   equityData: Array,
   operationSuggestion: Object,
-  adviceProfile: String,
-  adviceTemplates: Object,
   filteredOrders: Array,
   pagedOrders: Array,
   orderPage: Number,
@@ -975,7 +908,6 @@ const props = defineProps({
 const emit = defineEmits([
   'update:buyStrategyId',
   'update:sellStrategyId',
-  'update:adviceProfile',
   'update:gridUseBacktestBase',
   'update:gridExploreAllStrategies',
   'update:chartSymbol',
@@ -999,11 +931,6 @@ const sellStrategyIdProxy = computed({
 const chartSymbolProxy = computed({
   get: () => props.chartSymbol,
   set: (value) => emit('update:chartSymbol', value)
-})
-
-const adviceProfileProxy = computed({
-  get: () => props.adviceProfile || 'balanced',
-  set: (value) => emit('update:adviceProfile', value)
 })
 
 const gridUseBacktestBaseProxy = computed({
@@ -1039,19 +966,6 @@ const orderPageProxy = computed({
 const orderPageSizeProxy = computed({
   get: () => props.orderPageSize ?? 20,
   set: (value) => emit('update:orderPageSize', value)
-})
-
-const adviceProfileOptions = computed(() => {
-  const templates = props.adviceTemplates || {}
-  return Object.entries(templates).map(([key, template]) => ({
-    key,
-    label: template?.label || key
-  }))
-})
-
-const adviceTemplate = computed(() => {
-  const templates = props.adviceTemplates || {}
-  return templates[adviceProfileProxy.value] || null
 })
 
 const metricOf = (row, key) => {
