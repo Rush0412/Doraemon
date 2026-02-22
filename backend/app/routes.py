@@ -531,6 +531,508 @@ def _prefix_summary(summary: dict, prefix: str) -> dict:
     return {f"{prefix}{key}": value for key, value in summary.items()} if summary else {}
 
 
+def _run_metric(item: dict, key: str, default: float = 0.0) -> float:
+    value = item.get(f"validation_{key}")
+    if value is None:
+        value = item.get(key, default)
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if value != value:
+        return float(default)
+    return value
+
+
+def _run_metric_int(item: dict, key: str, default: int = 0) -> int:
+    value = item.get(f"validation_{key}")
+    if value is None:
+        value = item.get(key, default)
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    return value
+
+
+def _grid_sort_key(item: dict):
+    profit = _run_metric(item, "profit_sum", 0.0)
+    sharpe = _run_metric(item, "sharpe", 0.0)
+    win_rate = _run_metric(item, "win_rate", 0.0)
+    annual_return = _run_metric(item, "annual_return", 0.0)
+    drawdown = _run_metric(item, "max_drawdown", 0.0)
+    closed_orders = _run_metric_int(item, "closed_orders", 0)
+    return (profit, sharpe, win_rate, annual_return, -drawdown, closed_orders)
+
+
+def _grid_win_key(item: dict):
+    win_rate = _run_metric(item, "win_rate", 0.0)
+    profit = _run_metric(item, "profit_sum", 0.0)
+    sharpe = _run_metric(item, "sharpe", 0.0)
+    annual_return = _run_metric(item, "annual_return", 0.0)
+    drawdown = _run_metric(item, "max_drawdown", 0.0)
+    closed_orders = _run_metric_int(item, "closed_orders", 0)
+    return (win_rate, profit, sharpe, annual_return, -drawdown, closed_orders)
+
+
+def _summarize_orders_by_symbol(orders_pd, top_n: int = 10) -> list[dict]:
+    if orders_pd is None or getattr(orders_pd, "empty", True):
+        return []
+    if "symbol" not in orders_pd.columns:
+        return []
+    import pandas as pd
+
+    closed = orders_pd[orders_pd["sell_type"].isin(["win", "loss"])] if "sell_type" in orders_pd.columns else orders_pd
+    if closed is None or getattr(closed, "empty", True):
+        return []
+    scoped = closed.copy()
+    scoped["profit_num"] = pd.to_numeric(scoped.get("profit"), errors="coerce").fillna(0.0)
+    scoped["is_win"] = (scoped.get("result") == 1).astype(int)
+    grouped = (
+        scoped.groupby("symbol", dropna=True)
+        .agg(
+            closed_orders=("is_win", "size"),
+            wins=("is_win", "sum"),
+            profit_sum=("profit_num", "sum"),
+            profit_mean=("profit_num", "mean"),
+        )
+        .reset_index()
+    )
+    if grouped.empty:
+        return []
+    grouped["win_rate"] = grouped["wins"] / grouped["closed_orders"] * 100.0
+    grouped = grouped.sort_values(
+        by=["win_rate", "profit_sum", "closed_orders", "profit_mean"],
+        ascending=[False, False, False, False],
+    )
+    result = []
+    for idx, row in grouped.head(max(1, int(top_n))).iterrows():
+        result.append(
+            {
+                "rank": len(result) + 1,
+                "symbol": row["symbol"],
+                "closed_orders": int(row["closed_orders"]),
+                "wins": int(row["wins"]),
+                "win_rate": float(row["win_rate"]),
+                "profit_sum": float(row["profit_sum"]),
+                "profit_mean": float(row["profit_mean"]),
+            }
+        )
+    return result
+
+
+def _build_strategy_recommendation(run_summary: Optional[dict], top_symbols: list[dict]) -> dict:
+    if not run_summary:
+        return {}
+    win_rate = _run_metric(run_summary, "win_rate", 0.0)
+    drawdown = _run_metric(run_summary, "max_drawdown", 0.0)
+    sharpe = _run_metric(run_summary, "sharpe", 0.0)
+    profit = _run_metric(run_summary, "profit_sum", 0.0)
+    closed_orders = _run_metric_int(run_summary, "closed_orders", 0)
+    if drawdown >= 0.2 or win_rate < 50:
+        mode = "稳健"
+        position = "30%~45%"
+    elif win_rate >= 62 and drawdown <= 0.12 and sharpe >= 1.0:
+        mode = "激进"
+        position = "60%~75%"
+    else:
+        mode = "平衡"
+        position = "45%~60%"
+
+    notes = [
+        f"当前组合胜率 {win_rate:.1f}%，回撤 {drawdown:.3f}，夏普 {sharpe:.2f}。",
+        f"建议初始仓位区间：{position}。",
+    ]
+    if closed_orders < 20:
+        notes.append("样本交易笔数偏少，建议扩大回测区间再确认。")
+    if top_symbols:
+        names = ", ".join([str(item.get("symbol")) for item in top_symbols[:5] if item.get("symbol")])
+        if names:
+            notes.append(f"优先跟踪 Top 标的：{names}。")
+    if profit <= 0:
+        notes.append("收益未转正，建议先使用稳健模式并收紧止损。")
+
+    return {
+        "mode": mode,
+        "position_range": position,
+        "buy_strategy": run_summary.get("buy_strategy"),
+        "sell_strategy": run_summary.get("sell_strategy"),
+        "buy_params": run_summary.get("buy_params") or {},
+        "sell_params": run_summary.get("sell_params") or {},
+        "notes": notes,
+    }
+
+
+def _summary_from_ranked_symbols(top_symbols: list[dict], template: Optional[dict] = None) -> dict:
+    base = dict(template or {})
+    if not top_symbols:
+        base.setdefault("win_rate", 0.0)
+        base.setdefault("max_drawdown", 0.0)
+        base.setdefault("sharpe", 0.0)
+        base.setdefault("profit_sum", 0.0)
+        base.setdefault("annual_return", 0.0)
+        base.setdefault("closed_orders", 0)
+        return base
+
+    count = max(1, len(top_symbols))
+    win_rate = sum(float(item.get("win_rate", 0.0) or 0.0) for item in top_symbols) / count
+    sharpe = sum(float(item.get("sharpe", 0.0) or 0.0) for item in top_symbols) / count
+    max_drawdown = sum(float(item.get("max_drawdown", 0.0) or 0.0) for item in top_symbols) / count
+    annual_return = sum(float(item.get("annual_return", 0.0) or 0.0) for item in top_symbols) / count
+    profit_sum = sum(float(item.get("profit_sum", 0.0) or 0.0) for item in top_symbols)
+    closed_orders = sum(int(item.get("closed_orders", 0) or 0) for item in top_symbols)
+    base.update(
+        {
+            "win_rate": float(win_rate),
+            "max_drawdown": float(max_drawdown),
+            "sharpe": float(sharpe),
+            "profit_sum": float(profit_sum),
+            "annual_return": float(annual_return),
+            "closed_orders": int(closed_orders),
+        }
+    )
+    return base
+
+
+def _load_candidate_symbols_from_db(db: Session, market: str, limit: int = 500) -> list[str]:
+    market_keys = _market_scope(market)
+    rows = crud.list_stock_symbols_by_markets(db, market_keys)
+    normalized = []
+    for item in rows:
+        symbol = _normalize_symbol(item.symbol, item.market)
+        if symbol:
+            normalized.append(symbol)
+    deduped = list(dict.fromkeys(normalized))
+    cap = max(20, min(int(limit or 500), 5000))
+    return deduped[:cap]
+
+
+def _evaluate_symbols_for_run(
+    abu,
+    symbols: list[str],
+    cash,
+    buy_factors: list[dict],
+    sell_factors: list[dict],
+    n_folds,
+    start,
+    end,
+    top_n: int = 10,
+    eval_limit: int = 120,
+) -> dict:
+    eval_limit = max(5, min(int(eval_limit), 500))
+    top_n = max(1, min(int(top_n), 50))
+    candidates = symbols[:eval_limit]
+    rows = []
+    for symbol in candidates:
+        try:
+            abu_result, _ = abu.run_loop_back(
+                read_cash=cash,
+                buy_factors=buy_factors,
+                sell_factors=sell_factors,
+                choice_symbols=[symbol],
+                n_folds=n_folds,
+                start=start,
+                end=end,
+                n_process_kl=1,
+                n_process_pick=1,
+            )
+            if abu_result is None:
+                continue
+            summary = _summarize_run(abu_result)
+            if not summary:
+                continue
+            row = {
+                "symbol": symbol,
+                "closed_orders": int(summary.get("closed_orders", 0) or 0),
+                "win_rate": float(summary.get("win_rate", 0.0) or 0.0),
+                "profit_sum": float(summary.get("profit_sum", 0.0) or 0.0),
+                "profit_mean": float(summary.get("profit_mean", 0.0) or 0.0),
+                "annual_return": float(summary.get("annual_return", 0.0) or 0.0),
+                "sharpe": float(summary.get("sharpe", 0.0) or 0.0),
+                "max_drawdown": float(summary.get("max_drawdown", 0.0) or 0.0),
+            }
+            rows.append(row)
+        except Exception:
+            continue
+
+    rows_sorted = sorted(
+        rows,
+        key=lambda item: (
+            item.get("win_rate", 0.0),
+            item.get("profit_sum", 0.0),
+            item.get("sharpe", 0.0),
+            -item.get("max_drawdown", 0.0),
+            item.get("closed_orders", 0),
+        ),
+        reverse=True,
+    )
+    top_rows = []
+    for idx, row in enumerate(rows_sorted[:top_n], start=1):
+        top_rows.append({**row, "rank": idx})
+    return {
+        "evaluated": len(candidates),
+        "available": len(symbols),
+        "truncated": len(symbols) > len(candidates),
+        "top": top_rows,
+    }
+
+
+def _capital_curve_points(capital, limit: int = 3000) -> list[dict]:
+    if capital is None or not hasattr(capital, "capital_pd"):
+        return []
+    try:
+        import pandas as pd
+
+        raw_series = pd.to_numeric(capital.capital_pd.get("capital_blance"), errors="coerce")
+        if raw_series is None:
+            return []
+        series = raw_series.dropna()
+        if series is None or len(series) < 1:
+            return []
+        base = float(series.iloc[0])
+        pnl_series = series - base
+        if limit and len(pnl_series) > limit:
+            total = len(pnl_series)
+            if limit <= 1:
+                pnl_series = pnl_series.tail(1)
+            else:
+                # Keep the full timeline shape by evenly sampling indices
+                # instead of dropping all early history with tail(limit).
+                step = (total - 1) / float(limit - 1)
+                positions = sorted(
+                    {
+                        min(total - 1, max(0, int(round(i * step))))
+                        for i in range(int(limit))
+                    }
+                )
+                pnl_series = pnl_series.iloc[positions]
+        points = []
+        for idx, val in pnl_series.items():
+            try:
+                value = float(val)
+            except (TypeError, ValueError):
+                continue
+            if hasattr(idx, "strftime"):
+                time_str = idx.strftime("%Y-%m-%d")
+            else:
+                raw = str(idx)
+                if re.match(r"^\d{8}$", raw):
+                    time_str = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+                else:
+                    time_str = raw[:10]
+            points.append({"time": time_str, "value": value})
+        return points
+    except Exception:
+        return []
+
+
+def _build_actionable_candidates(
+    db: Session,
+    top_symbols: list[dict],
+    market: str,
+    mode: str = "平衡",
+    limit: int = 10,
+) -> list[dict]:
+    if not top_symbols:
+        return []
+    import pandas as pd
+
+    position_map = {
+        "稳健": "30%~45%",
+        "平衡": "45%~60%",
+        "激进": "60%~75%",
+    }
+    action_weight = {
+        "突破买入": 4.0,
+        "回踩观察买入": 3.0,
+        "持有观察": 2.0,
+        "观望": 1.0,
+        "减仓防守": 0.5,
+    }
+
+    candidates = []
+    for item in top_symbols[: max(limit * 3, 12)]:
+        symbol = str(item.get("symbol") or "").strip()
+        if not symbol:
+            continue
+        try:
+            symbol_market = _market_from_symbol(symbol) or market
+            rows = crud.load_klines(db, symbol_market, symbol)
+            if not rows:
+                continue
+            rows = rows[-220:]
+            kl = _kl_df_from_rows(rows)
+            if kl is None or len(kl) < 60:
+                continue
+
+            close = pd.to_numeric(kl.get("close"), errors="coerce").dropna()
+            if len(close) < 60:
+                continue
+            last_close = float(close.iloc[-1])
+            ma20 = float(close.rolling(20).mean().iloc[-1])
+            ma60 = float(close.rolling(60).mean().iloc[-1])
+            resistance = float(close.tail(20).max())
+            support = float(close.tail(20).min())
+            atr = None
+            if "atr14" in kl.columns:
+                atr = _safe_float(kl["atr14"].iloc[-1])
+            if (atr is None or atr <= 0) and "atr21" in kl.columns:
+                atr = _safe_float(kl["atr21"].iloc[-1])
+            if atr is None or atr <= 0:
+                atr = _safe_float((kl["high"] - kl["low"]).tail(14).mean()) if {"high", "low"}.issubset(kl.columns) else None
+
+            if last_close >= resistance * 0.995 and last_close > ma20 > ma60:
+                action = "突破买入"
+                reason = "价格接近/突破20日新高，且均线多头。"
+            elif last_close > ma60 and abs(last_close - ma20) / max(ma20, 1e-9) <= 0.012:
+                action = "回踩观察买入"
+                reason = "价格贴近20日均线且中期趋势仍偏强。"
+            elif last_close >= ma20 and ma20 >= ma60:
+                action = "持有观察"
+                reason = "趋势仍在，但未出现强突破点。"
+            elif last_close < ma60 * 0.985:
+                action = "减仓防守"
+                reason = "价格明显弱于中期均线，优先防守。"
+            else:
+                action = "观望"
+                reason = "趋势信号不明确。"
+
+            if atr and atr > 0:
+                stop_loss = last_close - 1.5 * atr
+                take_profit = last_close + 3.0 * atr
+            else:
+                stop_loss = last_close * 0.95
+                take_profit = last_close * 1.1
+
+            win_rate = float(item.get("win_rate") or 0.0)
+            profit_sum = float(item.get("profit_sum") or 0.0)
+            score = action_weight.get(action, 0.0) * 20 + win_rate * 0.9 + profit_sum * 0.001
+            candidates.append(
+                {
+                    "symbol": symbol,
+                    "action": action,
+                    "reason": reason,
+                    "position_range": position_map.get(mode, position_map["平衡"]),
+                    "win_rate": win_rate,
+                    "profit_sum": profit_sum,
+                    "last_close": last_close,
+                    "support": support,
+                    "resistance": resistance,
+                    "stop_loss": float(stop_loss),
+                    "take_profit": float(take_profit),
+                    "score": float(score),
+                }
+            )
+        except Exception:
+            continue
+
+    candidates = sorted(
+        candidates,
+        key=lambda x: (
+            float(x.get("score", 0.0)),
+            float(x.get("win_rate", 0.0)),
+            float(x.get("profit_sum", 0.0)),
+        ),
+        reverse=True,
+    )
+    return candidates[: max(1, min(limit, 30))]
+
+
+def _calc_custom_score(
+    run: dict,
+    weights: Optional[dict] = None,
+) -> float:
+    weights = weights or {}
+
+    def _weight(name: str, default: float = 1.0) -> float:
+        value = weights.get(name, default)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return float(default)
+
+    w_profit = _weight("profit", 1.0)
+    w_win = _weight("win_rate", 1.0)
+    w_sharpe = _weight("sharpe", 1.0)
+    w_return = _weight("annual_return", 1.0)
+    w_drawdown = _weight("drawdown", 1.0)
+    profit = _run_metric(run, "profit_sum", 0.0)
+    win_rate = _run_metric(run, "win_rate", 0.0)
+    sharpe = _run_metric(run, "sharpe", 0.0)
+    annual_return = _run_metric(run, "annual_return", 0.0)
+    drawdown = _run_metric(run, "max_drawdown", 0.0)
+    return (
+        profit * w_profit
+        + win_rate * w_win
+        + sharpe * 100.0 * w_sharpe
+        + annual_return * 100.0 * w_return
+        - drawdown * 100.0 * w_drawdown
+    )
+
+
+def _choose_grid_sort_key(metric: str, weights: Optional[dict] = None):
+    metric = (metric or "profit").strip().lower()
+    if metric == "win_rate":
+        return _grid_win_key
+    if metric == "sharpe":
+        return lambda item: (
+            _run_metric(item, "sharpe", 0.0),
+            _run_metric(item, "win_rate", 0.0),
+            _run_metric(item, "profit_sum", 0.0),
+            -_run_metric(item, "max_drawdown", 0.0),
+            _run_metric_int(item, "closed_orders", 0),
+        )
+    if metric == "annual_return":
+        return lambda item: (
+            _run_metric(item, "annual_return", 0.0),
+            _run_metric(item, "sharpe", 0.0),
+            _run_metric(item, "win_rate", 0.0),
+            -_run_metric(item, "max_drawdown", 0.0),
+            _run_metric_int(item, "closed_orders", 0),
+        )
+    if metric == "custom":
+        return lambda item: (
+            float(item.get("custom_score") or _calc_custom_score(item, weights)),
+            _run_metric(item, "win_rate", 0.0),
+            _run_metric(item, "profit_sum", 0.0),
+            _run_metric(item, "sharpe", 0.0),
+            -_run_metric(item, "max_drawdown", 0.0),
+        )
+    return _grid_sort_key
+
+
+def _build_next_param_suggestions(best_run: Optional[dict]) -> dict:
+    if not best_run:
+        return {}
+
+    def _expand(value):
+        number = _safe_float(value)
+        if number is None:
+            return [value]
+        if number == 0:
+            return [0, 0.1, 0.2]
+        return sorted(
+            set(
+                [
+                    round(number * 0.8, 4),
+                    round(number * 0.9, 4),
+                    round(number, 4),
+                    round(number * 1.1, 4),
+                    round(number * 1.2, 4),
+                ]
+            )
+        )
+
+    buy = best_run.get("buy_params") or {}
+    sell = best_run.get("sell_params") or {}
+    buy_grid = {k: _expand(v) for k, v in buy.items()}
+    sell_grid = {k: _expand(v) for k, v in sell.items()}
+    return {
+        "buy_params_grid": buy_grid,
+        "sell_params_grid": sell_grid,
+    }
+
+
 def _resolve_date_bounds(
     db: Session, symbols: list[str], start: Optional[str], end: Optional[str], n_folds: int
 ) -> tuple[Optional[date], Optional[date]]:
@@ -1445,6 +1947,7 @@ def list_feature_map():
             {"name": "数据下载界面操作", "source": "abupy_ui/widget_update_ui.py", "api": "/api/v1/quant/kl/update"},
             {"name": "历史回测界面操作", "source": "abupy_ui/widget_loop_back.py", "api": "/api/v1/quant/backtest"},
             {"name": "参数最优交叉验证", "source": "abupy/WidgetBu/ABuWGGridSearch.py", "api": "/api/v1/quant/grid-search"},
+            {"name": "独立选股任务", "source": "abupy strategy batch evaluator", "api": "/api/v1/quant/stock-select"},
             {"name": "量化分析工具", "source": "abupy_ui/widget_quant_tool.py", "api": "/api/v1/quant/tools"},
             {"name": "环境验证工具", "source": "abupy_ui/widget_verify_tool.py", "api": "/api/v1/quant/verify"},
         ],
@@ -1722,20 +2225,31 @@ def _run_job(job_id: int):
             orders_pd = getattr(abu_result, "orders_pd", None)
             summary.update(_summarize_orders(orders_pd))
             summary.update(_summarize_capital(getattr(abu_result, "capital", None)))
+            top_symbols = _summarize_orders_by_symbol(orders_pd, top_n=10)
+            equity_curve = _capital_curve_points(getattr(abu_result, "capital", None), limit=3000)
             orders_preview = None
             actions_preview = None
-            try:
-                if orders_pd is not None and hasattr(orders_pd, "head") and hasattr(orders_pd, "to_json"):
-                    import pandas as pd
+            if orders_pd is not None and hasattr(orders_pd, "head") and hasattr(orders_pd, "to_json"):
+                import pandas as pd
 
-                    orders_pd = orders_pd.copy()
-                    orders_pd["buy_date_int"] = pd.to_numeric(orders_pd.get("buy_date"), errors="coerce").fillna(0).astype(int)
-                    orders_pd["sell_date_int"] = pd.to_numeric(orders_pd.get("sell_date"), errors="coerce").fillna(0).astype(int)
-                    stop_loss_n = float(job.params.get("stop_loss_n", 0.5))
-                    stop_win_n = float(job.params.get("stop_win_n", 3.0))
-                    symbols_orders = orders_pd["symbol"].dropna().unique().tolist() if "symbol" in orders_pd else []
+                orders_safe = orders_pd.copy()
+                orders_safe["buy_date_int"] = pd.to_numeric(orders_safe.get("buy_date"), errors="coerce").fillna(0).astype(int)
+                orders_safe["sell_date_int"] = pd.to_numeric(orders_safe.get("sell_date"), errors="coerce").fillna(0).astype(int)
+                try:
+                    sell_params = _params_dict(job.params.get("sell_params"))
+                    stop_loss_n = _safe_float(sell_params.get("stop_loss_n"))
+                    if stop_loss_n is None:
+                        stop_loss_n = _safe_float(job.params.get("stop_loss_n"))
+                    if stop_loss_n is None:
+                        stop_loss_n = 0.5
+                    stop_win_n = _safe_float(sell_params.get("stop_win_n"))
+                    if stop_win_n is None:
+                        stop_win_n = _safe_float(job.params.get("stop_win_n"))
+                    if stop_win_n is None:
+                        stop_win_n = 3.0
+                    symbols_orders = orders_safe["symbol"].dropna().unique().tolist() if "symbol" in orders_safe else []
                     for sym in symbols_orders:
-                        sym_orders = orders_pd[orders_pd["symbol"] == sym]
+                        sym_orders = orders_safe[orders_safe["symbol"] == sym]
                         if sym_orders.empty:
                             continue
                         min_date = int(sym_orders["buy_date_int"].min())
@@ -1750,7 +2264,7 @@ def _run_job(job_id: int):
                             for row in rows
                         }
                         for idx in sym_orders.index:
-                            buy_date = int(orders_pd.at[idx, "buy_date_int"] or 0)
+                            buy_date = int(orders_safe.at[idx, "buy_date_int"] or 0)
                             if buy_date <= 0:
                                 continue
                             atr14, atr21 = atr_map.get(buy_date, (None, None))
@@ -1763,30 +2277,63 @@ def _run_job(job_id: int):
                                 atr_base += float(atr21)
                             if atr_base <= 0:
                                 continue
-                            buy_price = float(orders_pd.at[idx, "buy_price"] or 0)
-                            expect_direction = orders_pd.at[idx, "expect_direction"] or 1
+                            buy_price = float(orders_safe.at[idx, "buy_price"] or 0)
+                            expect_direction = orders_safe.at[idx, "expect_direction"] or 1
                             direction = 1 if float(expect_direction) >= 0 else -1
                             if direction >= 0:
-                                orders_pd.at[idx, "stop_loss_price"] = buy_price - stop_loss_n * atr_base
-                                orders_pd.at[idx, "stop_win_price"] = buy_price + stop_win_n * atr_base
+                                orders_safe.at[idx, "stop_loss_price"] = buy_price - stop_loss_n * atr_base
+                                orders_safe.at[idx, "stop_win_price"] = buy_price + stop_win_n * atr_base
                             else:
-                                orders_pd.at[idx, "stop_loss_price"] = buy_price + stop_loss_n * atr_base
-                                orders_pd.at[idx, "stop_win_price"] = buy_price - stop_win_n * atr_base
-                            orders_pd.at[idx, "atr_base"] = atr_base
-
-                    orders_json = orders_pd.head(200).to_json(orient="records", date_format="iso")
-                    orders_preview = json.loads(orders_json)
-            except Exception:
-                orders_preview = None
+                                orders_safe.at[idx, "stop_loss_price"] = buy_price + stop_loss_n * atr_base
+                                orders_safe.at[idx, "stop_win_price"] = buy_price - stop_win_n * atr_base
+                            orders_safe.at[idx, "atr_base"] = atr_base
+                except Exception:
+                    # keep raw orders if enrichment failed
+                    pass
+                try:
+                    preview_limit = int(job.params.get("orders_preview_limit", 2000))
+                except Exception:
+                    preview_limit = 2000
+                preview_limit = max(200, min(preview_limit, 10000))
+                if "buy_date_int" in orders_safe.columns:
+                    orders_safe = orders_safe.sort_values("buy_date_int")
+                if len(orders_safe) > preview_limit:
+                    # Preserve both early and recent trades for chart marker/history checks.
+                    head_size = max(100, int(preview_limit * 0.35))
+                    tail_size = max(100, preview_limit - head_size)
+                    orders_safe = pd.concat(
+                        [orders_safe.head(head_size), orders_safe.tail(tail_size)],
+                        axis=0,
+                    )
+                    if "buy_date_int" in orders_safe.columns:
+                        orders_safe = orders_safe.sort_values("buy_date_int")
+                orders_json = orders_safe.to_json(orient="records", date_format="iso")
+                orders_preview = json.loads(orders_json)
             try:
                 action_pd = getattr(abu_result, "action_pd", None)
                 if action_pd is not None and hasattr(action_pd, "head") and hasattr(action_pd, "to_json"):
-                    actions_json = action_pd.head(200).to_json(orient="records", date_format="iso")
+                    try:
+                        action_limit = int(job.params.get("actions_preview_limit", 2000))
+                    except Exception:
+                        action_limit = 2000
+                    action_limit = max(200, min(action_limit, 10000))
+                    actions_json = action_pd.tail(action_limit).to_json(orient="records", date_format="iso")
                     actions_preview = json.loads(actions_json)
             except Exception:
                 actions_preview = None
 
             result = {"summary": summary}
+            if top_symbols:
+                result["top_symbols"] = top_symbols
+                result["actionable_candidates"] = _build_actionable_candidates(
+                    db=db,
+                    top_symbols=top_symbols,
+                    market=market,
+                    mode="平衡",
+                    limit=min(10, len(top_symbols)),
+                )
+            if equity_curve:
+                result["equity_curve"] = equity_curve
             if orders_preview is not None:
                 result["orders"] = orders_preview
             if actions_preview is not None:
@@ -1836,8 +2383,11 @@ def _run_job(job_id: int):
                 sell_params_grid["stop_win_n"] = job.params.get("stop_win_n_list")
             max_runs = int(job.params.get("max_runs", 30))
             max_runs = max(1, min(max_runs, 5000))
+            ranking_metric = (job.params.get("ranking_metric") or "profit").strip().lower()
+            ranking_weights = job.params.get("ranking_weights") or {}
 
             runs = []
+            run_errors = []
             validation_mode = (job.params.get("validation_mode") or "none").strip().lower()
             train_ratio = float(job.params.get("train_ratio", 0.7))
             walk_forward_days = int(job.params.get("walk_forward_days", 365))
@@ -1855,129 +2405,206 @@ def _run_job(job_id: int):
                             start_date, end_date, train_ratio, walk_forward_days, walk_forward_step_days
                         )
             fallback_symbol = benchmark_symbol
+            total_candidates = 0
+            tested_runs = 0
             with _with_pg_data_env(market), _with_benchmark_fallback(fallback_symbol):
                 pairs = [(bs, ss) for bs in buy_strategy_list for ss in sell_strategy_list]
                 if not pairs:
                     pairs = [(buy_strategy, sell_strategy)]
-                base_budget = max_runs // len(pairs)
-                remainder = max_runs % len(pairs)
                 run_index = 0
-                for idx, (buy_strategy, sell_strategy) in enumerate(pairs):
-                    budget = base_budget + (1 if idx < remainder else 0)
-                    if budget <= 0:
-                        continue
+                for buy_strategy, sell_strategy in pairs:
                     buy_defaults = _find_strategy_defaults(buy_strategy, "buy")
                     buy_grid_filtered = _filter_param_grid(buy_strategy, "buy", buy_params_grid)
                     buy_param_sets = _build_param_grid(buy_defaults, buy_grid_filtered)
                     sell_defaults = _find_strategy_defaults(sell_strategy, "sell")
                     sell_grid_filtered = _filter_param_grid(sell_strategy, "sell", sell_params_grid)
                     sell_param_sets = _build_param_grid(sell_defaults, sell_grid_filtered)
-                    pair_runs = 0
+                    total_candidates += len(buy_param_sets) * len(sell_param_sets)
                     for buy_params in buy_param_sets:
                         for sell_params in sell_param_sets:
-                            if pair_runs >= budget or run_index >= max_runs:
+                            if run_index >= max_runs:
                                 break
                             combo_params = dict(job.params)
                             combo_params["buy_strategy"] = buy_strategy
                             combo_params["sell_strategy"] = sell_strategy
                             combo_params["buy_params"] = buy_params
                             combo_params["sell_params"] = sell_params
-                            buy_factors = _build_buy_factors(combo_params)
-                            sell_factors = _build_sell_factors(combo_params)
                             run_index += 1
-                            pair_runs += 1
-                            summary = {
-                                "buy_strategy": buy_strategy,
-                                "sell_strategy": sell_strategy,
-                                "buy_params": buy_params,
-                                "sell_params": sell_params,
-                                "buy_xd": buy_params.get("xd"),
-                                "stop_loss_n": sell_params.get("stop_loss_n"),
-                                "stop_win_n": sell_params.get("stop_win_n"),
-                                "benchmark": benchmark_symbol,
-                                "validation_mode": validation_mode if validation_slices else "none",
-                            }
-                            if validation_slices:
-                                train_summaries = []
-                                validation_summaries = []
-                                for train_start, train_end, val_start, val_end in validation_slices:
-                                    train_result, _ = abu.run_loop_back(
+                            tested_runs += 1
+                            try:
+                                buy_factors = _build_buy_factors(combo_params)
+                                sell_factors = _build_sell_factors(combo_params)
+                                summary = {
+                                    "buy_strategy": buy_strategy,
+                                    "sell_strategy": sell_strategy,
+                                    "buy_params": buy_params,
+                                    "sell_params": sell_params,
+                                    "buy_xd": buy_params.get("xd"),
+                                    "stop_loss_n": sell_params.get("stop_loss_n"),
+                                    "stop_win_n": sell_params.get("stop_win_n"),
+                                    "benchmark": benchmark_symbol,
+                                    "validation_mode": validation_mode if validation_slices else "none",
+                                }
+                                if validation_slices:
+                                    train_summaries = []
+                                    validation_summaries = []
+                                    for train_start, train_end, val_start, val_end in validation_slices:
+                                        try:
+                                            train_result, _ = abu.run_loop_back(
+                                                read_cash=cash,
+                                                buy_factors=buy_factors,
+                                                sell_factors=sell_factors,
+                                                choice_symbols=symbols,
+                                                n_folds=n_folds,
+                                                start=train_start.isoformat(),
+                                                end=train_end.isoformat(),
+                                                n_process_kl=1,
+                                                n_process_pick=1,
+                                            )
+                                            if train_result is not None:
+                                                train_summaries.append(_summarize_run(train_result))
+                                            val_result, _ = abu.run_loop_back(
+                                                read_cash=cash,
+                                                buy_factors=buy_factors,
+                                                sell_factors=sell_factors,
+                                                choice_symbols=symbols,
+                                                n_folds=n_folds,
+                                                start=val_start.isoformat(),
+                                                end=val_end.isoformat(),
+                                                n_process_kl=1,
+                                                n_process_pick=1,
+                                            )
+                                            if val_result is not None:
+                                                validation_summaries.append(_summarize_run(val_result))
+                                        except Exception as slice_exc:
+                                            if len(run_errors) < 30:
+                                                run_errors.append(
+                                                    {
+                                                        "stage": "validation_slice",
+                                                        "buy_strategy": buy_strategy,
+                                                        "sell_strategy": sell_strategy,
+                                                        "buy_params": buy_params,
+                                                        "sell_params": sell_params,
+                                                        "message": str(slice_exc),
+                                                    }
+                                                )
+                                            continue
+                                    if not train_summaries and not validation_summaries:
+                                        continue
+                                    train_summary = _aggregate_summaries(train_summaries)
+                                    validation_summary = _aggregate_summaries(validation_summaries)
+                                    summary.update(_prefix_summary(train_summary, "train_"))
+                                    summary.update(_prefix_summary(validation_summary, "validation_"))
+                                    summary["train_runs"] = len(train_summaries)
+                                    summary["validation_runs"] = len(validation_summaries)
+                                    summary["orders_rows"] = int(
+                                        summary.get("validation_closed_orders", 0) + summary.get("validation_open_orders", 0)
+                                    )
+                                    summary["actions_rows"] = 0
+                                else:
+                                    abu_result, _ = abu.run_loop_back(
                                         read_cash=cash,
                                         buy_factors=buy_factors,
                                         sell_factors=sell_factors,
                                         choice_symbols=symbols,
                                         n_folds=n_folds,
-                                        start=train_start.isoformat(),
-                                        end=train_end.isoformat(),
+                                        start=start,
+                                        end=end,
                                         n_process_kl=1,
                                         n_process_pick=1,
                                     )
-                                    if train_result is not None:
-                                        train_summaries.append(_summarize_run(train_result))
-                                    val_result, _ = abu.run_loop_back(
-                                        read_cash=cash,
-                                        buy_factors=buy_factors,
-                                        sell_factors=sell_factors,
-                                        choice_symbols=symbols,
-                                        n_folds=n_folds,
-                                        start=val_start.isoformat(),
-                                        end=val_end.isoformat(),
-                                        n_process_kl=1,
-                                        n_process_pick=1,
+                                    if abu_result is None:
+                                        continue
+                                    summary["benchmark"] = getattr(getattr(abu_result, "benchmark", None), "symbol", None)
+                                    summary.update(_summarize_run(abu_result))
+                                    summary["orders_rows"] = int(
+                                        summary.get("closed_orders", 0) + summary.get("open_orders", 0)
                                     )
-                                    if val_result is not None:
-                                        validation_summaries.append(_summarize_run(val_result))
-                                if not train_summaries and not validation_summaries:
-                                    continue
-                                train_summary = _aggregate_summaries(train_summaries)
-                                validation_summary = _aggregate_summaries(validation_summaries)
-                                summary.update(_prefix_summary(train_summary, "train_"))
-                                summary.update(_prefix_summary(validation_summary, "validation_"))
-                                summary["train_runs"] = len(train_summaries)
-                                summary["validation_runs"] = len(validation_summaries)
-                                summary["orders_rows"] = int(
-                                    summary.get("validation_closed_orders", 0) + summary.get("validation_open_orders", 0)
-                                )
-                                summary["actions_rows"] = 0
-                            else:
-                                abu_result, _ = abu.run_loop_back(
-                                    read_cash=cash,
-                                    buy_factors=buy_factors,
-                                    sell_factors=sell_factors,
-                                    choice_symbols=symbols,
-                                    n_folds=n_folds,
-                                    start=start,
-                                    end=end,
-                                    n_process_kl=1,
-                                    n_process_pick=1,
-                                )
-                                if abu_result is None:
-                                    continue
-                                summary["benchmark"] = getattr(getattr(abu_result, "benchmark", None), "symbol", None)
-                                summary.update(_summarize_run(abu_result))
-                                summary["orders_rows"] = int(
-                                    summary.get("closed_orders", 0) + summary.get("open_orders", 0)
-                                )
-                                summary["actions_rows"] = int(getattr(abu_result.action_pd, "shape", [0])[0])
-                            runs.append(summary)
-                        if pair_runs >= budget or run_index >= max_runs:
+                                    summary["actions_rows"] = int(getattr(abu_result.action_pd, "shape", [0])[0])
+                                summary["custom_score"] = _calc_custom_score(summary, ranking_weights)
+                                runs.append(summary)
+                            except Exception as combo_exc:
+                                if len(run_errors) < 30:
+                                    run_errors.append(
+                                        {
+                                            "stage": "combo",
+                                            "buy_strategy": buy_strategy,
+                                            "sell_strategy": sell_strategy,
+                                            "buy_params": buy_params,
+                                            "sell_params": sell_params,
+                                            "message": str(combo_exc),
+                                        }
+                                    )
+                                continue
+                        if run_index >= max_runs:
                             break
                     if run_index >= max_runs:
                         break
 
-            def _grid_sort_key(item: dict):
-                profit = item.get("validation_profit_sum")
-                if profit is None:
-                    profit = item.get("profit_sum", 0)
-                win_rate = item.get("validation_win_rate", item.get("win_rate", 0))
-                sharpe = item.get("validation_sharpe", item.get("sharpe", 0))
-                annual_return = item.get("validation_annual_return", item.get("annual_return", 0))
-                drawdown = item.get("validation_max_drawdown", item.get("max_drawdown", 0))
-                closed_orders = item.get("validation_closed_orders", item.get("closed_orders", 0))
-                return (profit, sharpe, win_rate, annual_return, -drawdown, closed_orders)
-
-            runs_sorted = sorted(runs, key=_grid_sort_key, reverse=True)
+            sort_key = _choose_grid_sort_key(ranking_metric, ranking_weights)
+            runs_sorted = sorted(runs, key=sort_key, reverse=True)
             best = runs_sorted[0] if runs_sorted else None
+            runs_by_win = sorted(runs, key=_grid_win_key, reverse=True)
+            best_win = runs_by_win[0] if runs_by_win else None
+            symbol_top_n = max(1, min(int(job.params.get("symbol_top_n", 10)), 50))
+            symbol_eval_limit = max(5, min(int(job.params.get("symbol_eval_limit", 120)), 500))
+            top_symbols = []
+            symbol_eval_meta = {}
+            recommendation = {}
+            actionable_candidates = []
+            best_for_symbol = best_win or best
+            if best_for_symbol:
+                best_params = dict(job.params)
+                best_params["buy_strategy"] = best_for_symbol.get("buy_strategy")
+                best_params["sell_strategy"] = best_for_symbol.get("sell_strategy")
+                best_params["buy_params"] = best_for_symbol.get("buy_params") or {}
+                best_params["sell_params"] = best_for_symbol.get("sell_params") or {}
+                try:
+                    best_buy_factors = _build_buy_factors(best_params)
+                    best_sell_factors = _build_sell_factors(best_params)
+                    symbol_eval = _evaluate_symbols_for_run(
+                        abu=abu,
+                        symbols=symbols,
+                        cash=cash,
+                        buy_factors=best_buy_factors,
+                        sell_factors=best_sell_factors,
+                        n_folds=n_folds,
+                        start=start,
+                        end=end,
+                        top_n=symbol_top_n,
+                        eval_limit=symbol_eval_limit,
+                    )
+                    top_symbols = symbol_eval.get("top") or []
+                    symbol_eval_meta = {
+                        "evaluated": symbol_eval.get("evaluated", 0),
+                        "available": symbol_eval.get("available", 0),
+                        "truncated": bool(symbol_eval.get("truncated")),
+                    }
+                except Exception:
+                    top_symbols = []
+                    symbol_eval_meta = {}
+                recommendation = _build_strategy_recommendation(best_for_symbol, top_symbols)
+                try:
+                    actionable_candidates = _build_actionable_candidates(
+                        db=db,
+                        top_symbols=top_symbols,
+                        market=market,
+                        mode=recommendation.get("mode", "平衡"),
+                        limit=symbol_top_n,
+                    )
+                except Exception:
+                    actionable_candidates = []
+
+            diagnostics = {
+                "candidate_runs": int(total_candidates),
+                "tested_runs": int(tested_runs),
+                "max_runs": int(max_runs),
+                "fully_tested": bool(total_candidates <= max_runs and tested_runs >= total_candidates),
+                "truncated": bool(total_candidates > max_runs),
+                "pair_count": int(len(pairs)),
+                "error_count": int(len(run_errors)),
+            }
+            next_param_suggestions = _build_next_param_suggestions(best_win or best)
             crud.set_quant_job_result(
                 db,
                 job,
@@ -1994,8 +2621,144 @@ def _run_job(job_id: int):
                     "walk_forward_days": walk_forward_days,
                     "walk_forward_step_days": walk_forward_step_days,
                     "max_runs": max_runs,
+                    "ranking_metric": ranking_metric,
+                    "ranking_weights": ranking_weights,
+                    "diagnostics": diagnostics,
                     "best": best,
+                    "best_by_win_rate": best_win,
+                    "recommendation": recommendation,
+                    "symbol_eval": symbol_eval_meta,
+                    "top_symbols": top_symbols,
+                    "actionable_candidates": actionable_candidates,
+                    "next_param_suggestions": next_param_suggestions,
+                    "errors": run_errors,
                     "runs": runs_sorted[:200],
+                },
+            )
+            return
+
+        if job.type == "stock_select":
+            from abupy import abu
+
+            market = (job.params.get("market") or "CN").upper()
+            cash = job.params.get("cash", 1000000)
+            n_folds = job.params.get("n_folds", 1)
+            start = job.params.get("start")
+            end = job.params.get("end")
+            buy_strategy = (job.params.get("buy_strategy") or "breakout").strip().lower()
+            sell_strategy = (job.params.get("sell_strategy") or "atr_stop").strip().lower()
+            _validate_strategy_list([buy_strategy], "buy")
+            _validate_strategy_list([sell_strategy], "sell")
+
+            requested_symbols = _normalize_symbols(job.params.get("symbols"), market)
+            all_symbols_raw = job.params.get("all_symbols", False)
+            if isinstance(all_symbols_raw, str):
+                all_symbols = all_symbols_raw.strip().lower() in {"1", "true", "yes", "y"}
+            else:
+                all_symbols = bool(all_symbols_raw)
+            candidate_limit = max(20, min(int(job.params.get("candidate_limit", 300)), 5000))
+            symbol_top_n = max(1, min(int(job.params.get("symbol_top_n", 10)), 50))
+            symbol_eval_limit = max(10, min(int(job.params.get("symbol_eval_limit", candidate_limit)), 500))
+            min_kline_rows = max(60, min(int(job.params.get("min_kline_rows", 120)), 2000))
+
+            symbols = list(dict.fromkeys(requested_symbols))
+            used_all_symbols = False
+            if all_symbols:
+                symbols = _load_candidate_symbols_from_db(db, market, limit=max(candidate_limit, symbol_eval_limit))
+                used_all_symbols = True
+            if not symbols:
+                raise RuntimeError("No symbols specified for stock select.")
+            symbols = symbols[: max(candidate_limit, symbol_eval_limit)]
+
+            available_symbols = []
+            missing_symbols = []
+            start_date = _parse_date_str(start)
+            end_date = _parse_date_str(end)
+            for symbol in symbols:
+                rows = crud.load_klines(db, _market_from_symbol(symbol), symbol, start=start_date, end=end_date)
+                if len(rows) >= min_kline_rows:
+                    available_symbols.append(symbol)
+                else:
+                    missing_symbols.append(symbol)
+            if not available_symbols:
+                raise RuntimeError(
+                    "No kline data available for stock select symbols; try kl_update first or widen date range."
+                )
+
+            params_with_strategy = dict(job.params)
+            params_with_strategy["buy_strategy"] = buy_strategy
+            params_with_strategy["sell_strategy"] = sell_strategy
+            buy_factors = _build_buy_factors(params_with_strategy)
+            sell_factors = _build_sell_factors(params_with_strategy)
+
+            fallback_symbol = available_symbols[0]
+            with _with_pg_data_env(market), _with_benchmark_fallback(fallback_symbol):
+                symbol_eval = _evaluate_symbols_for_run(
+                    abu=abu,
+                    symbols=available_symbols,
+                    cash=cash,
+                    buy_factors=buy_factors,
+                    sell_factors=sell_factors,
+                    n_folds=n_folds,
+                    start=start,
+                    end=end,
+                    top_n=symbol_top_n,
+                    eval_limit=symbol_eval_limit,
+                )
+
+            top_symbols = symbol_eval.get("top") or []
+            base_summary = {
+                "market": market,
+                "buy_strategy": buy_strategy,
+                "sell_strategy": sell_strategy,
+                "buy_params": _params_dict(job.params.get("buy_params")),
+                "sell_params": _params_dict(job.params.get("sell_params")),
+            }
+            summary_metrics = _summary_from_ranked_symbols(top_symbols, base_summary)
+            recommendation = _build_strategy_recommendation(summary_metrics, top_symbols)
+            actionable_candidates = _build_actionable_candidates(
+                db=db,
+                top_symbols=top_symbols,
+                market=market,
+                mode=recommendation.get("mode", "平衡"),
+                limit=symbol_top_n,
+            )
+
+            summary = {
+                **summary_metrics,
+                "requested_symbols": len(symbols),
+                "available_symbols": len(available_symbols),
+                "missing_symbols": len(missing_symbols),
+                "evaluated_symbols": int(symbol_eval.get("evaluated", 0) or 0),
+                "top_n": len(top_symbols),
+                "all_symbols_mode": used_all_symbols,
+                "candidate_limit": candidate_limit,
+                "eval_limit": symbol_eval_limit,
+                "start": start,
+                "end": end,
+                "n_folds": n_folds,
+            }
+            diagnostics = {
+                "requested_symbols": len(symbols),
+                "available_symbols": len(available_symbols),
+                "missing_symbols": len(missing_symbols),
+                "evaluated_symbols": int(symbol_eval.get("evaluated", 0) or 0),
+                "truncated": bool(symbol_eval.get("truncated")),
+                "all_symbols_mode": used_all_symbols,
+                "candidate_limit": candidate_limit,
+                "eval_limit": symbol_eval_limit,
+                "min_kline_rows": min_kline_rows,
+            }
+            crud.set_quant_job_result(
+                db,
+                job,
+                {
+                    "summary": summary,
+                    "diagnostics": diagnostics,
+                    "recommendation": recommendation,
+                    "top_symbols": top_symbols,
+                    "actionable_candidates": actionable_candidates,
+                    "missing_symbols": missing_symbols[:200],
                 },
             )
             return
@@ -2473,6 +3236,13 @@ def start_backtest(payload: dict, db: Session = Depends(get_db)):
 @quant_router.post("/grid-search", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
 def start_grid_search(payload: dict, db: Session = Depends(get_db)):
     job = crud.create_quant_job(db, schemas.QuantJobCreate(type="grid_search", params=payload))
+    executor.submit(_run_job, job.id)
+    return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.model_validate(job))
+
+
+@quant_router.post("/stock-select", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
+def start_stock_select(payload: dict, db: Session = Depends(get_db)):
+    job = crud.create_quant_job(db, schemas.QuantJobCreate(type="stock_select", params=payload))
     executor.submit(_run_job, job.id)
     return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.model_validate(job))
 

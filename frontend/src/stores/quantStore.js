@@ -126,6 +126,13 @@ export const useQuantStore = defineStore('quant', {
       await this.fetchJobs()
       return job
     },
+    async startStockSelect(params = {}) {
+      const { data } = await api.post('/quant/stock-select', params)
+      const job = data.data
+      this.activeJob = job
+      await this.fetchJobs()
+      return job
+    },
     async startQuantTool(params = {}) {
       const { data } = await api.post('/quant/tools', params)
       const job = data.data

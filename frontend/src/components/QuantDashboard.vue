@@ -4,9 +4,9 @@
       <div class="hero-head">
         <div>
           <p class="eyebrow">Doraemon Quant Suite</p>
-          <h1>量化控制台</h1>
+          <h1>量化交易指挥台</h1>
           <p class="hero-sub">
-            数据更新、回测、参数寻优与量化分析一体化视图。
+            数据更新、策略回测、参数寻优、量化分析与操作建议的一体化闭环。
           </p>
         </div>
         <div class="hero-actions">
@@ -113,8 +113,12 @@
       :buy-strategy-params="buyStrategyParams"
       :sell-strategy-params="sellStrategyParams"
       :run-backtest="runBacktest"
+      :run-stock-select="runStockSelect"
+      :run-closed-loop="runClosedLoop"
       :actions-busy="actionsBusy"
       :backtest-summary="backtestSummary"
+      :backtest-top-symbols="backtestTopSymbols"
+      :backtest-actionable-candidates="backtestActionableCandidates"
       :backtest-trade-stats="backtestTradeStats"
       :backtest-symbols="backtestSymbols"
       v-model:chart-symbol="chartSymbol"
@@ -128,6 +132,8 @@
       :kline-data="klineData"
       :equity-data="equityData"
       :operation-suggestion="operationSuggestion"
+      v-model:advice-profile="adviceProfile"
+      :advice-templates="adviceTemplates"
       :filtered-orders="filteredOrders"
       :paged-orders="pagedOrders"
       v-model:order-page="orderPage"
@@ -143,10 +149,24 @@
       :show-backtest-visual="showBacktestVisual"
       :run-grid-search="runGridSearch"
       :grid-summary="gridSummary"
+      :grid-diagnostics="gridDiagnostics"
+      :stock-select-summary="stockSelectSummary"
+      :stock-select-diagnostics="stockSelectDiagnostics"
+      :stock-select-top-symbols="stockSelectTopSymbols"
+      :stock-select-actionable-candidates="stockSelectActionableCandidates"
+      :stock-select-recommendation="stockSelectRecommendation"
+      :grid-top-symbols="gridTopSymbols"
+      :grid-actionable-candidates="gridActionableCandidates"
+      :grid-recommendation="gridRecommendation"
+      :grid-errors="gridErrors"
+      :grid-next-param-suggestions="gridNextParamSuggestions"
       :grid-top-runs="gridTopRuns"
       :grid-summary-text="gridSummaryText"
       :apply-grid-to-backtest="applyGridToBacktest"
       :apply-grid-run-to-backtest="applyGridRunToBacktest"
+      :apply-grid-next-suggestions="applyGridNextSuggestions"
+      :apply-symbol-to-backtest="applySymbolToBacktest"
+      :apply-symbol-to-analysis="applySymbolToAnalysis"
       :set-kline-container="setKlineContainer"
       :set-equity-container="setEquityContainer"
     />
@@ -200,29 +220,29 @@ const tabs = [
     id: 'prepare',
     step: '01',
     title: '数据准备',
-    subtitle: '检索 → 更新',
-    hint: '先检索并建立选股篮，再更新 K 线到 PG 数据库。'
+    subtitle: '标的与更新',
+    hint: '搜索标的、维护组合，并先完成K线更新。'
   },
   {
     id: 'strategy',
     step: '02',
-    title: '策略验证',
-    subtitle: '回测 → 寻优',
-    hint: '先回测验证，再用网格寻优确定参数并回填。'
+    title: '回测与寻优',
+    subtitle: '验证策略',
+    hint: '执行历史回测、参数交叉验证，并将最优组合应用到回测。'
   },
   {
     id: 'tools',
     step: '03',
     title: '量化分析',
-    subtitle: '解释与对比',
-    hint: '用趋势线、相关性与统计指标解释策略表现。'
+    subtitle: '信号工具',
+    hint: '运行支撑阻力、跳空、趋势速度等工具生成交易信号。'
   },
   {
     id: 'jobs',
     step: '04',
-    title: '任务记录',
-    subtitle: '导出与复盘',
-    hint: '查看执行过程、导出结果并沉淀结论。'
+    title: '任务中心',
+    subtitle: '状态与导出',
+    hint: '查看任务状态、结果明细并导出。'
   }
 ]
 const activeTab = ref('prepare')
@@ -269,6 +289,7 @@ const showStopLines = ref(true)
 const analysisOverlayEnabled = ref(true)
 const gridUseBacktestBase = ref(true)
 const gridExploreAllStrategies = ref(true)
+const flowRunning = ref(false)
 const orderPage = ref(1)
 const orderPageSize = ref(20)
 const setKlineContainer = (el) => {
@@ -324,11 +345,30 @@ const gridForm = reactive({
   train_ratio: 0.7,
   walk_forward_days: 365,
   walk_forward_step_days: 180,
+  ranking_metric: 'profit',
+  ranking_weights: {
+    profit: 1.0,
+    win_rate: 1.0,
+    sharpe: 1.0,
+    annual_return: 1.0,
+    drawdown: 1.0
+  },
+  symbol_top_n: 10,
+  symbol_eval_limit: 120,
   n_folds: 1,
   start: '',
   end: '',
   max_runs: 30
 })
+if (!gridForm.ranking_weights || typeof gridForm.ranking_weights !== 'object') {
+  gridForm.ranking_weights = {
+    profit: 1.0,
+    win_rate: 1.0,
+    sharpe: 1.0,
+    annual_return: 1.0,
+    drawdown: 1.0
+  }
+}
 
 const toolForm = reactive({
   market: market.value,
@@ -358,8 +398,140 @@ const toolOptions = reactive({
   field: 'p_change'
 })
 
+const SETTINGS_KEY = 'doraemon_quant_settings_v1'
+const settingsReady = ref(false)
+let settingsSaveTimer = null
+
+const plainObject = (value) => {
+  try {
+    return JSON.parse(JSON.stringify(value ?? {}))
+  } catch {
+    return {}
+  }
+}
+
+const saveQuantSettings = () => {
+  if (!settingsReady.value) return
+  const snapshot = {
+    market: market.value,
+    query: query.value,
+    kind: kind.value,
+    pageSize: pageSize.value,
+    backtestForm: plainObject(backtestForm),
+    gridForm: plainObject(gridForm),
+    toolForm: plainObject(toolForm),
+    updateForm: plainObject(updateForm),
+    buyStrategyId: buyStrategyId.value,
+    sellStrategyId: sellStrategyId.value,
+    buyStrategyParams: plainObject(buyStrategyParams),
+    sellStrategyParams: plainObject(sellStrategyParams),
+    gridBuyParamLists: plainObject(gridBuyParamLists),
+    gridSellParamLists: plainObject(gridSellParamLists),
+    gridUseBacktestBase: !!gridUseBacktestBase.value,
+    gridExploreAllStrategies: !!gridExploreAllStrategies.value,
+    adviceProfile: adviceProfile.value,
+    adviceTemplates: plainObject(adviceTemplates),
+  }
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(snapshot))
+  } catch {
+    // ignore storage write error
+  }
+}
+
+const scheduleSaveQuantSettings = () => {
+  if (!settingsReady.value) return
+  if (settingsSaveTimer) clearTimeout(settingsSaveTimer)
+  settingsSaveTimer = setTimeout(() => {
+    saveQuantSettings()
+    settingsSaveTimer = null
+  }, 180)
+}
+
+const restoreAdviceTemplates = (payload) => {
+  if (!payload || typeof payload !== 'object') return
+  ;['conservative', 'balanced', 'aggressive'].forEach((key) => {
+    const source = payload[key]
+    const target = adviceTemplates[key]
+    if (!source || !target) return
+    if (typeof source.label === 'string' && source.label.trim()) target.label = source.label
+    if (source.position && typeof source.position === 'object') {
+      Object.assign(target.position, source.position)
+    }
+    if (source.entry && typeof source.entry === 'object') {
+      Object.assign(target.entry, source.entry)
+    }
+    if (source.takeProfit && typeof source.takeProfit === 'object') {
+      Object.assign(target.takeProfit, source.takeProfit)
+    }
+    if (source.trailStopPct !== undefined) {
+      target.trailStopPct = Number(source.trailStopPct)
+    }
+  })
+}
+
+const restoreQuantSettings = async () => {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY)
+    if (!raw) return
+    const snapshot = JSON.parse(raw)
+    if (!snapshot || typeof snapshot !== 'object') return
+    if (typeof snapshot.market === 'string' && snapshot.market.trim()) market.value = snapshot.market
+    if (typeof snapshot.query === 'string') query.value = snapshot.query
+    if (typeof snapshot.kind === 'string') kind.value = snapshot.kind
+    if (Number.isFinite(Number(snapshot.pageSize)) && Number(snapshot.pageSize) > 0) {
+      pageSize.value = Number(snapshot.pageSize)
+    }
+    if (snapshot.updateForm && typeof snapshot.updateForm === 'object') Object.assign(updateForm, snapshot.updateForm)
+    if (snapshot.backtestForm && typeof snapshot.backtestForm === 'object') Object.assign(backtestForm, snapshot.backtestForm)
+    if (snapshot.gridForm && typeof snapshot.gridForm === 'object') Object.assign(gridForm, snapshot.gridForm)
+    if (!gridForm.ranking_weights || typeof gridForm.ranking_weights !== 'object') {
+      gridForm.ranking_weights = {}
+    }
+    gridForm.ranking_weights = {
+      profit: Number(gridForm.ranking_weights.profit ?? 1),
+      win_rate: Number(gridForm.ranking_weights.win_rate ?? 1),
+      sharpe: Number(gridForm.ranking_weights.sharpe ?? 1),
+      annual_return: Number(gridForm.ranking_weights.annual_return ?? 1),
+      drawdown: Number(gridForm.ranking_weights.drawdown ?? 1)
+    }
+    if (snapshot.toolForm && typeof snapshot.toolForm === 'object') Object.assign(toolForm, snapshot.toolForm)
+    if (typeof snapshot.buyStrategyId === 'string' && snapshot.buyStrategyId.trim()) {
+      buyStrategyId.value = snapshot.buyStrategyId
+    }
+    if (typeof snapshot.sellStrategyId === 'string' && snapshot.sellStrategyId.trim()) {
+      sellStrategyId.value = snapshot.sellStrategyId
+    }
+    if (snapshot.gridUseBacktestBase !== undefined) {
+      gridUseBacktestBase.value = !!snapshot.gridUseBacktestBase
+    }
+    if (snapshot.gridExploreAllStrategies !== undefined) {
+      gridExploreAllStrategies.value = !!snapshot.gridExploreAllStrategies
+    }
+    if (typeof snapshot.adviceProfile === 'string' && snapshot.adviceProfile.trim()) {
+      adviceProfile.value = snapshot.adviceProfile
+    }
+    restoreAdviceTemplates(snapshot.adviceTemplates)
+    await nextTick()
+    if (snapshot.buyStrategyParams && typeof snapshot.buyStrategyParams === 'object') {
+      Object.assign(buyStrategyParams, snapshot.buyStrategyParams)
+    }
+    if (snapshot.sellStrategyParams && typeof snapshot.sellStrategyParams === 'object') {
+      Object.assign(sellStrategyParams, snapshot.sellStrategyParams)
+    }
+    if (snapshot.gridBuyParamLists && typeof snapshot.gridBuyParamLists === 'object') {
+      Object.assign(gridBuyParamLists, snapshot.gridBuyParamLists)
+    }
+    if (snapshot.gridSellParamLists && typeof snapshot.gridSellParamLists === 'object') {
+      Object.assign(gridSellParamLists, snapshot.gridSellParamLists)
+    }
+  } catch {
+    // ignore malformed storage
+  }
+}
+
 const actionsBusy = computed(
-  () => store.jobsLoading || store.activeJobLoading || store.symbolsLoading
+  () => store.jobsLoading || store.activeJobLoading || store.symbolsLoading || flowRunning.value
 )
 
 const buyStrategies = computed(() => store.strategies?.buy || [])
@@ -470,14 +642,42 @@ const backtestJob = computed(() => {
 })
 
 const backtestSummary = computed(() => backtestJob.value?.result?.summary || null)
+const backtestTopSymbols = computed(() => {
+  const rows = backtestJob.value?.result?.top_symbols
+  return Array.isArray(rows) ? rows : []
+})
+const backtestActionableCandidates = computed(() => {
+  const rows = backtestJob.value?.result?.actionable_candidates
+  return Array.isArray(rows) ? rows : []
+})
 
 const backtestOrders = computed(() => backtestJob.value?.result?.orders || [])
 
-const filteredOrders = computed(() => {
+const normalizeSymbol = (value) => {
+  const raw = String(value || '').trim().toLowerCase()
+  if (!raw) return ''
+  return raw.replace(/[^a-z0-9]/g, '')
+}
+
+const symbolEquals = (left, right) => {
+  const a = normalizeSymbol(left)
+  const b = normalizeSymbol(right)
+  if (!a || !b) return false
+  if (a === b) return true
+  const stripCnPrefix = (text) => (/^[a-z]{2}\d{5,}$/.test(text) ? text.slice(2) : text)
+  const aCode = stripCnPrefix(a)
+  const bCode = stripCnPrefix(b)
+  return !!aCode && !!bCode && aCode === bCode
+}
+
+const chartOrdersAll = computed(() => {
   const orders = backtestOrders.value || []
-  const scoped = chartSymbol.value
-    ? orders.filter((item) => String(item.symbol || '').toLowerCase() === chartSymbol.value.toLowerCase())
-    : orders
+  if (!chartSymbol.value) return orders
+  return orders.filter((item) => symbolEquals(item.symbol, chartSymbol.value))
+})
+
+const filteredOrders = computed(() => {
+  const scoped = chartOrdersAll.value
   if (orderFilter.value === 'win') return scoped.filter((item) => resolveOrderProfit(item) > 0)
   if (orderFilter.value === 'loss') return scoped.filter((item) => resolveOrderProfit(item) < 0)
   if (orderFilter.value === 'hold') {
@@ -553,7 +753,39 @@ const gridJob = computed(() => {
   return latestJobByType('grid_search')
 })
 
+const stockSelectJob = computed(() => {
+  if (store.activeJob && store.activeJob.type === 'stock_select') return store.activeJob
+  return latestJobByType('stock_select')
+})
+
+const stockSelectSummary = computed(() => stockSelectJob.value?.result?.summary || null)
+const stockSelectDiagnostics = computed(() => stockSelectJob.value?.result?.diagnostics || null)
+const stockSelectTopSymbols = computed(() => {
+  const rows = stockSelectJob.value?.result?.top_symbols
+  return Array.isArray(rows) ? rows : []
+})
+const stockSelectActionableCandidates = computed(() => {
+  const rows = stockSelectJob.value?.result?.actionable_candidates
+  return Array.isArray(rows) ? rows : []
+})
+const stockSelectRecommendation = computed(() => stockSelectJob.value?.result?.recommendation || null)
+
 const gridSummary = computed(() => gridJob.value?.result?.best || null)
+const gridDiagnostics = computed(() => gridJob.value?.result?.diagnostics || null)
+const gridTopSymbols = computed(() => {
+  const rows = gridJob.value?.result?.top_symbols
+  return Array.isArray(rows) ? rows : []
+})
+const gridActionableCandidates = computed(() => {
+  const rows = gridJob.value?.result?.actionable_candidates
+  return Array.isArray(rows) ? rows : []
+})
+const gridRecommendation = computed(() => gridJob.value?.result?.recommendation || null)
+const gridErrors = computed(() => {
+  const rows = gridJob.value?.result?.errors
+  return Array.isArray(rows) ? rows : []
+})
+const gridNextParamSuggestions = computed(() => gridJob.value?.result?.next_param_suggestions || null)
 
 const pickGridMetric = (run, key, fallback = 0) => {
   if (!run) return fallback
@@ -575,10 +807,12 @@ const gridTopRuns = computed(() => {
     rank: idx + 1,
     score: Number(
       (
-        pickGridMetric(run, 'profit_sum') * 0.55 +
-        pickGridMetric(run, 'win_rate') * 0.25 +
-        pickGridMetric(run, 'sharpe') * 10 -
-        pickGridMetric(run, 'max_drawdown') * 100
+        Number.isFinite(Number(run?.custom_score))
+          ? Number(run.custom_score)
+          : pickGridMetric(run, 'profit_sum') * 0.55 +
+            pickGridMetric(run, 'win_rate') * 0.25 +
+            pickGridMetric(run, 'sharpe') * 10 -
+            pickGridMetric(run, 'max_drawdown') * 100
       ).toFixed(2)
     )
   }))
@@ -597,13 +831,75 @@ const analysisText = computed(() =>
   analysisResult.value ? JSON.stringify(analysisResult.value, null, 2) : ''
 )
 
+const adviceProfile = ref('balanced')
+const adviceTemplates = reactive({
+  conservative: {
+    label: '稳健',
+    position: {
+      buyHigh: 0.45,
+      buyMid: 0.3,
+      buyWatchHigh: 0.28,
+      buyWatchMid: 0.18,
+      reduce: 0.15,
+      watch: 0.1
+    },
+    entry: { first: 0.45, pullback: 0.35, breakout: 0.2 },
+    takeProfit: { tp1: 0.3, tp2: 0.4, tp3: 0.3 },
+    trailStopPct: 0.04
+  },
+  balanced: {
+    label: '平衡',
+    position: {
+      buyHigh: 0.6,
+      buyMid: 0.45,
+      buyWatchHigh: 0.4,
+      buyWatchMid: 0.25,
+      reduce: 0.2,
+      watch: 0.12
+    },
+    entry: { first: 0.5, pullback: 0.3, breakout: 0.2 },
+    takeProfit: { tp1: 0.4, tp2: 0.4, tp3: 0.2 },
+    trailStopPct: 0.05
+  },
+  aggressive: {
+    label: '激进',
+    position: {
+      buyHigh: 0.75,
+      buyMid: 0.6,
+      buyWatchHigh: 0.5,
+      buyWatchMid: 0.35,
+      reduce: 0.25,
+      watch: 0.15
+    },
+    entry: { first: 0.55, pullback: 0.25, breakout: 0.2 },
+    takeProfit: { tp1: 0.35, tp2: 0.35, tp3: 0.3 },
+    trailStopPct: 0.06
+  }
+})
+
+const clamp01 = (value, fallback = 0) => {
+  const num = Number(value)
+  if (!Number.isFinite(num)) return fallback
+  return Math.max(0, Math.min(1, num))
+}
+
+const normalizeTriplet = (a, b, c, defaults = [0.4, 0.4, 0.2]) => {
+  const values = [Number(a), Number(b), Number(c)].map((item) => (Number.isFinite(item) ? Math.max(item, 0) : 0))
+  const sum = values.reduce((acc, item) => acc + item, 0)
+  if (sum <= 0) return defaults
+  return values.map((item) => item / sum)
+}
+
+const currentAdviceTemplate = computed(() => adviceTemplates[adviceProfile.value] || adviceTemplates.balanced)
+
 const operationSuggestion = computed(() => {
   const signal = analysisResult.value?.signal || null
   const stats = backtestTradeStats.value
   const hasGridBest = !!gridSummary.value || gridTopRuns.value.length > 0
+  const tpl = currentAdviceTemplate.value
 
   let direction = 'watch'
-  let reason = '暂无明确趋势信号，建议等待更清晰的突破或回踩确认。'
+  let reason = '暂无明确趋势信号，建议等待突破或支撑确认。'
   let score = 0
 
   if (signal?.action === 'breakout') {
@@ -612,15 +908,15 @@ const operationSuggestion = computed(() => {
     score += 2
   } else if (signal?.action === 'near_support') {
     direction = 'buy_watch'
-    reason = signal.reason || '价格接近支撑位，可等待止跌确认。'
+    reason = signal.reason || '价格接近支撑位，等待确认后分批加仓。'
     score += 1
   } else if (signal?.action === 'breakdown') {
     direction = 'sell'
-    reason = signal.reason || '价格向下跌破支撑位。'
+    reason = signal.reason || '价格跌破支撑位。'
     score -= 2
   } else if (signal?.action === 'near_resistance') {
     direction = 'reduce'
-    reason = signal.reason || '价格接近阻力位，注意减仓或止盈。'
+    reason = signal.reason || '价格接近阻力位，建议减仓保护收益。'
     score -= 1
   } else if (signal?.reason) {
     reason = signal.reason
@@ -630,63 +926,70 @@ const operationSuggestion = computed(() => {
     if (stats.winRate >= 60) score += 1
     else if (stats.winRate < 45) score -= 1
   }
-
   if (hasGridBest) score += 0.5
 
   if (direction === 'buy' && score <= 0) direction = 'buy_watch'
   if (direction === 'sell' && score >= 0) direction = 'reduce'
 
   const confidence = score >= 2 ? '高' : score <= -1 ? '低' : '中'
-  const actionTextMap = {
-    buy: '偏多买入',
-    buy_watch: '观察买点',
-    sell: '止损卖出',
-    reduce: '减仓止盈',
-    watch: '观望'
+
+  let positionPct = clamp01(tpl.position.watch, 0.1)
+  if (direction === 'buy') {
+    positionPct = confidence === 'High' ? clamp01(tpl.position.buyHigh, 0.6) : clamp01(tpl.position.buyMid, 0.45)
+  } else if (direction === 'buy_watch') {
+    positionPct =
+      confidence === 'High' ? clamp01(tpl.position.buyWatchHigh, 0.4) : clamp01(tpl.position.buyWatchMid, 0.25)
+  } else if (direction === 'reduce') {
+    positionPct = clamp01(tpl.position.reduce, 0.2)
+  } else if (direction === 'sell') {
+    positionPct = 0
   }
 
-  const hintParts = []
-  if (stats) {
-    hintParts.push(
-      `回测胜率 ${formatNumber(stats.winRate, 1)}%，总盈亏 ${formatNumber(stats.totalProfit, 2)}`
-    )
-  }
-  if (hasGridBest) {
-    hintParts.push('参数已存在网格最优解，优先按最优参数执行。')
-  }
-  if (signal?.support || signal?.resistance) {
-    hintParts.push(
-      `支撑 ${formatNumber(signal?.support)}，阻力 ${formatNumber(signal?.resistance)}`
-    )
-  }
-
-  let positionPct = 0.1
-  if (direction === 'buy') positionPct = confidence === '高' ? 0.6 : 0.45
-  if (direction === 'buy_watch') positionPct = confidence === '高' ? 0.4 : 0.25
-  if (direction === 'reduce') positionPct = 0.2
-  if (direction === 'sell') positionPct = 0
   if (stats?.winRate && stats.winRate < 45) positionPct = Math.max(0, positionPct - 0.1)
-  if (stats?.winRate && stats.winRate > 65) positionPct = Math.min(0.8, positionPct + 0.1)
-  if (signal?.last_close && signal?.stop_loss && signal.stop_loss >= signal.last_close) {
-    positionPct = Math.min(positionPct, 0.15)
-  }
+  if (stats?.winRate && stats.winRate > 65) positionPct = Math.min(0.85, positionPct + 0.1)
 
   const stopLoss = signal?.stop_loss ?? null
   const takeProfit = signal?.take_profit ?? null
   const lastClose = signal?.last_close ?? null
+  if (lastClose && stopLoss && Number(stopLoss) >= Number(lastClose)) {
+    positionPct = Math.min(positionPct, 0.15)
+  }
+
   const delta =
     Number.isFinite(Number(takeProfit)) && Number.isFinite(Number(lastClose))
       ? Number(takeProfit) - Number(lastClose)
       : null
-  const tp1 =
+  const tp1Price =
     Number.isFinite(delta) && delta > 0 && Number.isFinite(Number(lastClose))
       ? Number((Number(lastClose) + delta * 0.5).toFixed(2))
       : takeProfit
-  const tp2 = Number.isFinite(Number(takeProfit)) ? Number(Number(takeProfit).toFixed(2)) : null
-  const tp3 =
+  const tp2Price = Number.isFinite(Number(takeProfit)) ? Number(Number(takeProfit).toFixed(2)) : null
+  const tp3Price =
     Number.isFinite(delta) && delta > 0 && Number.isFinite(Number(takeProfit))
       ? Number((Number(takeProfit) + delta * 0.5).toFixed(2))
       : null
+
+  const [entry1, entry2, entry3] = normalizeTriplet(tpl.entry.first, tpl.entry.pullback, tpl.entry.breakout, [0.5, 0.3, 0.2])
+  const [tp1Ratio, tp2Ratio, tp3Ratio] = normalizeTriplet(tpl.takeProfit.tp1, tpl.takeProfit.tp2, tpl.takeProfit.tp3, [0.4, 0.4, 0.2])
+
+  const hintParts = []
+  if (stats) {
+    hintParts.push(`回测胜率 ${formatNumber(stats.winRate, 1)}%，累计盈亏 ${formatNumber(stats.totalProfit, 2)}`)
+  }
+  if (hasGridBest) {
+    hintParts.push('已获得寻优组合，建议先对重点标的做二次回测后再实盘。')
+  }
+  if (signal?.support || signal?.resistance) {
+    hintParts.push(`支撑位 ${formatNumber(signal?.support)}，阻力位 ${formatNumber(signal?.resistance)}`)
+  }
+
+  const actionTextMap = {
+    buy: '买入 / 加仓',
+    buy_watch: '观察待买',
+    sell: '止损 / 清仓',
+    reduce: '减仓',
+    watch: '观望'
+  }
 
   return {
     direction,
@@ -699,28 +1002,30 @@ const operationSuggestion = computed(() => {
     takeProfit,
     positionPct,
     positionText: `${Math.round(positionPct * 100)}%`,
+    profileKey: adviceProfile.value,
+    profileLabel: tpl.label,
     tranchePlan:
       direction === 'buy' || direction === 'buy_watch'
         ? [
-            { label: '首次建仓', ratio: 0.5, trigger: '当前价附近分批买入' },
-            { label: '回踩加仓', ratio: 0.3, trigger: '回踩支撑不破再加仓' },
-            { label: '突破加仓', ratio: 0.2, trigger: '放量突破阻力后加仓' }
+            { label: '首批', ratio: entry1, trigger: '当前价附近先建第一笔仓位' },
+            { label: '回踩加仓', ratio: entry2, trigger: '回踩支撑不破时加仓' },
+            { label: '突破加仓', ratio: entry3, trigger: '突破确认后追加仓位' }
           ]
-        : [{ label: '防守仓位', ratio: 1, trigger: '以减仓和风控为主' }],
+        : [{ label: '防守', ratio: 1, trigger: '优先降低风险敞口' }],
     takeProfitPlan:
       direction === 'buy' || direction === 'buy_watch'
         ? [
-            { label: '止盈一', ratio: 0.4, target: tp1 },
-            { label: '止盈二', ratio: 0.4, target: tp2 },
-            { label: '止盈三', ratio: 0.2, target: tp3 }
+            { label: 'TP1', ratio: tp1Ratio, target: tp1Price },
+            { label: 'TP2', ratio: tp2Ratio, target: tp2Price },
+            { label: 'TP3', ratio: tp3Ratio, target: tp3Price }
           ]
         : [
             { label: '减仓线', ratio: 0.5, target: signal?.resistance ?? null },
-            { label: '清仓线', ratio: 0.5, target: stopLoss }
+            { label: '退出线', ratio: 0.5, target: stopLoss }
           ],
     riskRule: {
       hardStop: stopLoss,
-      trailStopPct: confidence === '高' ? 0.06 : 0.04
+      trailStopPct: clamp01(tpl.trailStopPct, 0.05)
     }
   }
 })
@@ -745,17 +1050,32 @@ const applyGridCandidateToBacktest = async (candidate) => {
     resetStrategyParams(activeSellStrategy.value, sellStrategyParams)
     Object.assign(sellStrategyParams, candidate.sell_params)
     if (candidate.sell_params.stop_loss_n !== undefined) {
-      backtestForm.stop_loss_n = Number(candidate.sell_params.stop_loss_n)
+      const val = Number(candidate.sell_params.stop_loss_n)
+      if (Number.isFinite(val)) backtestForm.stop_loss_n = val
     }
     if (candidate.sell_params.stop_win_n !== undefined) {
-      backtestForm.stop_win_n = Number(candidate.sell_params.stop_win_n)
+      const val = Number(candidate.sell_params.stop_win_n)
+      if (Number.isFinite(val)) backtestForm.stop_win_n = val
     }
   }
-  if (candidate.buy_xd !== undefined) backtestForm.buy_xd = Number(candidate.buy_xd) || backtestForm.buy_xd
-  if (candidate.stop_loss_n !== undefined) backtestForm.stop_loss_n = Number(candidate.stop_loss_n)
-  if (candidate.stop_win_n !== undefined) backtestForm.stop_win_n = Number(candidate.stop_win_n)
+  if (candidate.buy_xd !== undefined) {
+    const val = Number(candidate.buy_xd)
+    if (Number.isFinite(val) && val > 0) backtestForm.buy_xd = val
+  }
+  if (candidate.stop_loss_n !== undefined) {
+    const val = Number(candidate.stop_loss_n)
+    if (Number.isFinite(val)) backtestForm.stop_loss_n = val
+  }
+  if (candidate.stop_win_n !== undefined) {
+    const val = Number(candidate.stop_win_n)
+    if (Number.isFinite(val)) backtestForm.stop_win_n = val
+  }
   if (Array.isArray(candidate.symbols) && candidate.symbols.length) {
     backtestForm.symbols = candidate.symbols.join(', ')
+  }
+  if (typeof candidate.symbol === 'string' && candidate.symbol.trim()) {
+    backtestForm.symbols = candidate.symbol.trim()
+    chartSymbol.value = candidate.symbol.trim()
   }
   if (candidate.market) backtestForm.market = candidate.market
   activeTab.value = 'strategy'
@@ -767,6 +1087,52 @@ const applyGridToBacktest = async () => {
 
 const applyGridRunToBacktest = async (run) => {
   await applyGridCandidateToBacktest(run)
+}
+
+const applyGridNextSuggestions = () => {
+  const next = gridNextParamSuggestions.value
+  if (!next || typeof next !== 'object') return
+  if (next.buy_params_grid && typeof next.buy_params_grid === 'object') {
+    Object.entries(next.buy_params_grid).forEach(([key, values]) => {
+      if (!Array.isArray(values)) return
+      gridBuyParamLists[key] = values.join(', ')
+    })
+  }
+  if (next.sell_params_grid && typeof next.sell_params_grid === 'object') {
+    Object.entries(next.sell_params_grid).forEach(([key, values]) => {
+      if (!Array.isArray(values)) return
+      gridSellParamLists[key] = values.join(', ')
+    })
+  }
+}
+
+const applySymbolToBacktest = (symbol) => {
+  if (!symbol) return
+  const text = String(symbol).trim()
+  if (!text) return
+  backtestForm.symbols = text
+  chartSymbol.value = text
+  activeTab.value = 'strategy'
+}
+
+const inferMarketBySymbol = (symbol) => {
+  const raw = String(symbol || '').trim().toLowerCase()
+  if (raw.startsWith('us')) return 'US'
+  if (raw.startsWith('hk')) return 'HK'
+  if (raw.startsWith('sh')) return 'SH'
+  if (raw.startsWith('sz3')) return '300'
+  if (raw.startsWith('sz')) return 'SZ'
+  return market.value || 'SH'
+}
+
+const applySymbolToAnalysis = async (symbol) => {
+  if (!symbol) return
+  const text = String(symbol).trim()
+  if (!text) return
+  toolForm.symbols = text
+  toolForm.market = inferMarketBySymbol(text)
+  activeTab.value = 'tools'
+  await runTool()
 }
 
 watch(backtestSummary, (val) => {
@@ -827,6 +1193,33 @@ watch(activeTab, async (val) => {
   await nextTick()
   handleResize()
 })
+
+watch(
+  () => [
+    market.value,
+    query.value,
+    kind.value,
+    pageSize.value,
+    buyStrategyId.value,
+    sellStrategyId.value,
+    gridUseBacktestBase.value,
+    gridExploreAllStrategies.value,
+    adviceProfile.value,
+  ],
+  () => {
+    scheduleSaveQuantSettings()
+  }
+)
+
+watch(backtestForm, scheduleSaveQuantSettings, { deep: true })
+watch(gridForm, scheduleSaveQuantSettings, { deep: true })
+watch(toolForm, scheduleSaveQuantSettings, { deep: true })
+watch(updateForm, scheduleSaveQuantSettings, { deep: true })
+watch(buyStrategyParams, scheduleSaveQuantSettings, { deep: true })
+watch(sellStrategyParams, scheduleSaveQuantSettings, { deep: true })
+watch(gridBuyParamLists, scheduleSaveQuantSettings, { deep: true })
+watch(gridSellParamLists, scheduleSaveQuantSettings, { deep: true })
+watch(adviceTemplates, scheduleSaveQuantSettings, { deep: true })
 
 const activeParamsText = computed(() =>
   store.activeJob?.params ? JSON.stringify(store.activeJob.params, null, 2) : ''
@@ -923,10 +1316,33 @@ const resetGridParamLists = (strategy, target) => {
 
 const toDateInt = (value) => {
   if (value === null || value === undefined) return null
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null
+    if (value > 100000000000) {
+      const d = new Date(value)
+      if (Number.isNaN(d.getTime())) return null
+      const yyyy = d.getFullYear()
+      const mm = String(d.getMonth() + 1).padStart(2, '0')
+      const dd = String(d.getDate()).padStart(2, '0')
+      return Number(`${yyyy}${mm}${dd}`)
+    }
+    if (value > 1000000000 && value < 100000000000) {
+      const d = new Date(value * 1000)
+      if (Number.isNaN(d.getTime())) return null
+      const yyyy = d.getFullYear()
+      const mm = String(d.getMonth() + 1).padStart(2, '0')
+      const dd = String(d.getDate()).padStart(2, '0')
+      return Number(`${yyyy}${mm}${dd}`)
+    }
+    return value
+  }
   const raw = String(value).trim()
   if (!raw) return null
   if (/^\d{8}$/.test(raw)) return Number(raw)
+  if (/^\d{13}$/.test(raw) || /^\d{10}$/.test(raw)) {
+    const n = Number(raw)
+    return toDateInt(n)
+  }
   const date = new Date(raw)
   if (Number.isNaN(date.getTime())) return null
   const yyyy = date.getFullYear()
@@ -1127,12 +1543,18 @@ const applyVisibleRange = () => {
 }
 
 const buildMarkers = () => {
-  const orders = (filteredOrders.value || []).slice(0, 200)
+  const orders = chartOrdersAll.value || []
+  if (!orders.length) return []
+  const maxMarkers = 5000
+  const markerOrders = orders.length > maxMarkers ? orders.slice(-maxMarkers) : orders
+  const minDate = klineData.value.length ? toDateInt(klineData.value[0]?.date) || 0 : 0
+  const maxDate = klineData.value.length ? toDateInt(klineData.value[klineData.value.length - 1]?.date) || 0 : 0
   const markers = []
-  orders.forEach((order) => {
+  markerOrders.forEach((order) => {
+    const buyDate = toDateInt(order.buy_date) || 0
     const buyTime = toChartTime(order.buy_date)
     const sellTime = toChartTime(order.sell_date)
-    if (buyTime) {
+    if (buyTime && (!minDate || (buyDate >= minDate && buyDate <= maxDate))) {
       markers.push({
         time: buyTime,
         position: 'belowBar',
@@ -1141,7 +1563,8 @@ const buildMarkers = () => {
         text: `买 ${formatNumber(order.buy_price)}`
       })
     }
-    if (sellTime && Number(order.sell_date) > 0) {
+    const sellDate = toDateInt(order.sell_date) || 0
+    if (sellTime && Number(order.sell_date) > 0 && (!minDate || (sellDate >= minDate && sellDate <= maxDate))) {
       markers.push({
         time: sellTime,
         position: 'aboveBar',
@@ -1302,11 +1725,7 @@ const syncAnalysisToChart = async () => {
 const updateChartData = () => {
   ensureChart()
   if (!chartRef.value || !candleSeries.value || !volumeSeries.value) return
-  const data = (klineData.value || []).slice().sort((a, b) => {
-    const left = toDateInt(a.date) || 0
-    const right = toDateInt(b.date) || 0
-    return left - right
-  })
+  const data = klineData.value || []
   if (!data.length) {
     candleSeries.value.setData([])
     volumeSeries.value.setData([])
@@ -1344,9 +1763,20 @@ const updateChartData = () => {
 }
 
 const buildEquitySeries = () => {
+  const curve = backtestJob.value?.result?.equity_curve
+  if (Array.isArray(curve) && curve.length) {
+    return curve
+      .map((item) => ({
+        time: toChartTime(item.time || item.date || item.x),
+        value: Number(item.value ?? item.y),
+      }))
+      .filter((item) => item.time && Number.isFinite(item.value))
+      .sort((a, b) => String(a.time).localeCompare(String(b.time)))
+  }
+
   const allOrders = backtestOrders.value || []
   const symbolScoped = chartSymbol.value
-    ? allOrders.filter((item) => String(item.symbol || '').toLowerCase() === chartSymbol.value.toLowerCase())
+    ? allOrders.filter((item) => symbolEquals(item.symbol, chartSymbol.value))
     : allOrders
   const scopedClosedCount = symbolScoped.filter((item) => isClosedOrder(item)).length
   const sourceOrders = scopedClosedCount ? symbolScoped : allOrders
@@ -1363,7 +1793,18 @@ const buildEquitySeries = () => {
     .filter((row) => row.time && Number.isFinite(row.profit))
     .sort((a, b) => String(a.time).localeCompare(String(b.time)))
 
-  if (!rows.length) return []
+  if (!rows.length) {
+    const fallbackRows = sourceOrders
+      .map((order) => {
+        const time = toChartTime(order.sell_date || order.buy_date)
+        const profit = Number(order?.profit)
+        return { time, profit }
+      })
+      .filter((row) => row.time && Number.isFinite(row.profit))
+      .sort((a, b) => String(a.time).localeCompare(String(b.time)))
+    if (!fallbackRows.length) return []
+    rows.push(...fallbackRows)
+  }
 
   const dailyProfit = new Map()
   rows.forEach((row) => {
@@ -1417,7 +1858,7 @@ const loadKlineChart = async () => {
         market: backtestForm.market,
         start: backtestForm.start || undefined,
         end: backtestForm.end || undefined,
-        limit: 600
+        limit: 2000
       }
     })
     const items = data.data?.items || []
@@ -1667,6 +2108,68 @@ const applyPageSize = async () => {
   })
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const waitForJobDone = async (jobId, timeoutMs = 20 * 60 * 1000, pollMs = 1200) => {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt <= timeoutMs) {
+    await store.fetchJob(jobId)
+    const current = store.activeJob
+    if (current?.id === jobId && (current.status === 'succeeded' || current.status === 'failed')) {
+      await store.fetchJobs()
+      if (current.status === 'failed') {
+        throw new Error(current.error || `任务 ${jobId} 执行失败`)
+      }
+      return current
+    }
+    await sleep(pollMs)
+  }
+  throw new Error(`任务 ${jobId} 超时未完成`)
+}
+
+const buildBacktestPayload = () => ({
+  market: backtestForm.market,
+  symbols: backtestForm.symbols,
+  n_folds: backtestForm.n_folds,
+  start: backtestForm.start || undefined,
+  end: backtestForm.end || undefined,
+  cash: backtestForm.cash,
+  buy_xd: backtestForm.buy_xd,
+  stop_loss_n: backtestForm.stop_loss_n,
+  stop_win_n: backtestForm.stop_win_n,
+  buy_strategy: buyStrategyId.value,
+  buy_params: { ...buyStrategyParams },
+  sell_strategy: sellStrategyId.value,
+  sell_params: { ...sellStrategyParams },
+  orders_preview_limit: 8000,
+  actions_preview_limit: 8000
+})
+
+const buildStockSelectPayload = () => {
+  const rawSymbols = String(backtestForm.symbols || '').trim()
+  const fallbackCandidateLimit = Math.max(Number(gridForm.symbol_eval_limit || 120), Number(gridForm.symbol_top_n || 10) * 3)
+  return {
+    market: backtestForm.market,
+    symbols: rawSymbols || undefined,
+    all_symbols: !rawSymbols,
+    candidate_limit: fallbackCandidateLimit,
+    symbol_eval_limit: Number(gridForm.symbol_eval_limit || 120),
+    symbol_top_n: Number(gridForm.symbol_top_n || 10),
+    min_kline_rows: 120,
+    n_folds: backtestForm.n_folds,
+    start: backtestForm.start || undefined,
+    end: backtestForm.end || undefined,
+    cash: backtestForm.cash,
+    buy_xd: backtestForm.buy_xd,
+    stop_loss_n: backtestForm.stop_loss_n,
+    stop_win_n: backtestForm.stop_win_n,
+    buy_strategy: buyStrategyId.value,
+    buy_params: { ...buyStrategyParams },
+    sell_strategy: sellStrategyId.value,
+    sell_params: { ...sellStrategyParams }
+  }
+}
+
 const runVerify = async () => {
   const job = await store.startVerify()
   await store.fetchJob(job.id)
@@ -1688,27 +2191,75 @@ const runKlUpdate = async () => {
 }
 
 const runBacktest = async () => {
-  const job = await store.startBacktest({
-    market: backtestForm.market,
-    symbols: backtestForm.symbols,
-    n_folds: backtestForm.n_folds,
-    start: backtestForm.start || undefined,
-    end: backtestForm.end || undefined,
-    cash: backtestForm.cash,
-    buy_xd: backtestForm.buy_xd,
-    stop_loss_n: backtestForm.stop_loss_n,
-    stop_win_n: backtestForm.stop_win_n,
-    buy_strategy: buyStrategyId.value,
-    buy_params: { ...buyStrategyParams },
-    sell_strategy: sellStrategyId.value,
-    sell_params: { ...sellStrategyParams }
-  })
+  const job = await store.startBacktest(buildBacktestPayload())
   await store.fetchJob(job.id)
+  return job
+}
+
+const runStockSelect = async () => {
+  const job = await store.startStockSelect(buildStockSelectPayload())
+  await store.fetchJob(job.id)
+  return job
+}
+
+const runClosedLoop = async () => {
+  flowRunning.value = true
+  klineError.value = ''
+  try {
+    const selectQueued = await store.startStockSelect(buildStockSelectPayload())
+    const selectDone = await waitForJobDone(selectQueued.id)
+    const selectResult = selectDone?.result || {}
+    const topSymbols = Array.isArray(selectResult.top_symbols)
+      ? selectResult.top_symbols.map((item) => String(item.symbol || '').trim()).filter(Boolean)
+      : []
+    if (!topSymbols.length) {
+      throw new Error('独立选股未返回可回测标的，请调整范围后重试')
+    }
+
+    const picked = topSymbols.slice(0, Math.max(1, Number(gridForm.symbol_top_n || 10)))
+    backtestForm.symbols = picked.join(', ')
+    chartSymbol.value = picked[0]
+
+    const backtestQueued = await store.startBacktest(buildBacktestPayload())
+    await waitForJobDone(backtestQueued.id)
+
+    toolForm.market = backtestForm.market
+    toolForm.tool = 'support_resistance'
+    toolForm.symbols = picked[0]
+    toolForm.start = backtestForm.start || ''
+    toolForm.end = backtestForm.end || ''
+    const analysisQueued = await store.startQuantTool({
+      market: toolForm.market,
+      tool: toolForm.tool,
+      symbols: toolForm.symbols,
+      n_folds: toolForm.n_folds,
+      start: toolForm.start || undefined,
+      end: toolForm.end || undefined,
+      limit: toolForm.limit,
+      options: buildToolOptions()
+    })
+    await waitForJobDone(analysisQueued.id)
+
+    activeTab.value = 'strategy'
+    await nextTick()
+    await loadKlineChart()
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+  } finally {
+    flowRunning.value = false
+  }
 }
 
 const runGridSearch = async () => {
   const buyGrid = buildGridParamPayload(activeBuyStrategy.value, gridBuyParamLists)
   const sellGrid = buildGridParamPayload(activeSellStrategy.value, gridSellParamLists)
+  const rankingWeights = {
+    profit: Number(gridForm.ranking_weights?.profit ?? 1),
+    win_rate: Number(gridForm.ranking_weights?.win_rate ?? 1),
+    sharpe: Number(gridForm.ranking_weights?.sharpe ?? 1),
+    annual_return: Number(gridForm.ranking_weights?.annual_return ?? 1),
+    drawdown: Number(gridForm.ranking_weights?.drawdown ?? 1)
+  }
   const customBuyList = parseStringList(gridForm.buy_strategies)
   const customSellList = parseStringList(gridForm.sell_strategies)
   const buyStrategyList = gridExploreAllStrategies.value
@@ -1740,6 +2291,10 @@ const runGridSearch = async () => {
     train_ratio: gridForm.train_ratio,
     walk_forward_days: gridForm.walk_forward_days,
     walk_forward_step_days: gridForm.walk_forward_step_days,
+    ranking_metric: gridForm.ranking_metric,
+    ranking_weights: rankingWeights,
+    symbol_top_n: gridForm.symbol_top_n,
+    symbol_eval_limit: gridForm.symbol_eval_limit,
     max_runs: gridForm.max_runs
   })
   await store.fetchJob(job.id)
@@ -1818,10 +2373,17 @@ onMounted(async () => {
       pageSize: store.pageSize
     })
   ])
+  await restoreQuantSettings()
+  settingsReady.value = true
+  scheduleSaveQuantSettings()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
+  if (settingsSaveTimer) {
+    clearTimeout(settingsSaveTimer)
+    settingsSaveTimer = null
+  }
   if (chartRef.value) {
     chartRef.value.remove()
     chartRef.value = null

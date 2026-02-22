@@ -615,6 +615,20 @@ select:focus {
   color: #0f172a;
 }
 
+.advice-profile-toolbar {
+  margin-top: 10px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.advice-template-card .form-grid {
+  margin-top: 10px;
+}
+
+.advice-template-card input {
+  max-width: 160px;
+}
+
 .params-cell {
   max-width: 360px;
   white-space: normal;

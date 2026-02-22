@@ -6,7 +6,7 @@
           <h2>历史回测</h2>
           <p class="muted">执行经典买入突破 + ATR 止损止盈。</p>
         </div>
-        <span class="pill">Backtest</span>
+        <span class="pill">回测</span>
       </header>
       <p class="panel-note">建议回测区间 ≥ 1 年；若无成交请缩短买入周期或扩大回测时间。</p>
       <div class="form-grid">
@@ -93,6 +93,8 @@
       </div>
       <div class="toolbar">
         <button class="btn-primary" @click="runBacktest" :disabled="actionsBusy">启动回测</button>
+        <button class="btn-secondary" @click="runStockSelect" :disabled="actionsBusy">独立选股</button>
+        <button class="btn-secondary" @click="runClosedLoop" :disabled="actionsBusy">一键闭环</button>
         <span class="muted">回测完成后可导出 CSV</span>
       </div>
       <div v-if="backtestSummary" class="result-card">
@@ -110,6 +112,154 @@
             <p class="muted">基准</p>
             <p class="metric-value">{{ backtestSummary.benchmark || '-' }}</p>
           </div>
+        </div>
+      </div>
+      <div v-if="backtestTopSymbols?.length" class="result-card">
+        <h3>股票回测榜单（前 {{ backtestTopSymbols.length }}）</h3>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>标的</th>
+                <th>胜率</th>
+                <th>累计盈亏</th>
+                <th>已平仓</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in backtestTopSymbols" :key="`backtest-symbol-${row.rank}-${row.symbol}`">
+                <td class="mono">{{ row.rank }}</td>
+                <td class="mono">{{ row.symbol }}</td>
+                <td class="mono">{{ formatNumber(row.win_rate, 1) }}%</td>
+                <td class="mono">{{ formatNumber(row.profit_sum) }}</td>
+                <td class="mono">{{ row.closed_orders }}</td>
+                <td>
+                  <button class="btn-secondary" @click="applySymbolToBacktest(row.symbol)">用于回测</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div v-if="backtestActionableCandidates?.length" class="result-card">
+        <h3>近期可操作候选（回测）</h3>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>标的</th>
+                <th>建议动作</th>
+                <th>建议仓位</th>
+                <th>胜率</th>
+                <th>止损/止盈</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in backtestActionableCandidates" :key="`backtest-action-${row.symbol}`">
+                <td class="mono">{{ row.symbol }}</td>
+                <td>{{ row.action }}</td>
+                <td class="mono">{{ row.position_range }}</td>
+                <td class="mono">{{ formatNumber(row.win_rate, 1) }}%</td>
+                <td class="mono">{{ formatNumber(row.stop_loss) }} / {{ formatNumber(row.take_profit) }}</td>
+                <td class="table-actions">
+                  <button class="btn-secondary" @click="applySymbolToBacktest(row.symbol)">用于回测</button>
+                  <button class="btn-secondary" @click="applySymbolToAnalysis(row.symbol)">量化分析</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div v-if="stockSelectSummary" class="result-card">
+        <h3>独立选股结果</h3>
+        <div class="result-grid">
+          <div>
+            <p class="muted">请求标的数</p>
+            <p class="metric-value">{{ stockSelectSummary.requested_symbols ?? '-' }}</p>
+          </div>
+          <div>
+            <p class="muted">有效标的数</p>
+            <p class="metric-value">{{ stockSelectSummary.available_symbols ?? '-' }}</p>
+          </div>
+          <div>
+            <p class="muted">已评估标的数</p>
+            <p class="metric-value">{{ stockSelectSummary.evaluated_symbols ?? '-' }}</p>
+          </div>
+          <div>
+            <p class="muted">推荐模式</p>
+            <p class="metric-value">{{ stockSelectRecommendation?.mode || '-' }}</p>
+          </div>
+        </div>
+        <p class="muted" v-if="stockSelectRecommendation?.notes?.length">
+          {{ stockSelectRecommendation.notes.join('；') }}
+        </p>
+        <p class="muted" v-if="stockSelectDiagnostics">
+          评估上限 {{ stockSelectDiagnostics.eval_limit ?? '-' }}，最小K线 {{ stockSelectDiagnostics.min_kline_rows ?? '-' }}
+        </p>
+      </div>
+      <div v-if="stockSelectTopSymbols?.length" class="result-card">
+        <h3>独立选股 Top {{ stockSelectTopSymbols.length }}</h3>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>标的</th>
+                <th>胜率</th>
+                <th>累计盈亏</th>
+                <th>夏普</th>
+                <th>回撤</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in stockSelectTopSymbols" :key="`select-${row.rank}-${row.symbol}`">
+                <td class="mono">{{ row.rank }}</td>
+                <td class="mono">{{ row.symbol }}</td>
+                <td class="mono">{{ formatNumber(row.win_rate, 1) }}%</td>
+                <td class="mono">{{ formatNumber(row.profit_sum) }}</td>
+                <td class="mono">{{ formatNumber(row.sharpe, 2) }}</td>
+                <td class="mono">{{ formatNumber(row.max_drawdown, 3) }}</td>
+                <td class="table-actions">
+                  <button class="btn-secondary" @click="applySymbolToBacktest(row.symbol)">用于回测</button>
+                  <button class="btn-secondary" @click="applySymbolToAnalysis(row.symbol)">量化分析</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div v-if="stockSelectActionableCandidates?.length" class="result-card">
+        <h3>独立选股可操作候选</h3>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>标的</th>
+                <th>建议动作</th>
+                <th>建议仓位</th>
+                <th>止损/止盈</th>
+                <th>原因</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in stockSelectActionableCandidates" :key="`select-action-${row.symbol}`">
+                <td class="mono">{{ row.symbol }}</td>
+                <td>{{ row.action }}</td>
+                <td class="mono">{{ row.position_range }}</td>
+                <td class="mono">{{ formatNumber(row.stop_loss) }} / {{ formatNumber(row.take_profit) }}</td>
+                <td>{{ row.reason }}</td>
+                <td class="table-actions">
+                  <button class="btn-secondary" @click="applySymbolToBacktest(row.symbol)">用于回测</button>
+                  <button class="btn-secondary" @click="applySymbolToAnalysis(row.symbol)">量化分析</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
       <div v-if="showBacktestVisual" class="result-card backtest-visual trading-stage">
@@ -187,6 +337,84 @@
         </div>
         <div v-if="operationSuggestion" class="result-card advice-card">
           <h3>当日操作建议</h3>
+          <div class="toolbar advice-profile-toolbar">
+            <label class="label">风险模板</label>
+            <select v-model="adviceProfileProxy" class="select">
+              <option v-for="item in adviceProfileOptions" :key="item.key" :value="item.key">
+                {{ item.label }}
+              </option>
+            </select>
+            <span class="muted">可手动调整仓位、建仓比例、止盈比例、移动止损</span>
+          </div>
+          <div v-if="adviceTemplate" class="info-card advice-template-card">
+            <p class="muted">模板参数（当前档位）</p>
+            <div class="form-grid">
+              <div>
+                <label class="label">强信号买入仓位</label>
+                <input v-model.number="adviceTemplate.position.buyHigh" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label class="label">中信号买入仓位</label>
+                <input v-model.number="adviceTemplate.position.buyMid" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label class="label">观察买入(强)仓位</label>
+                <input
+                  v-model.number="adviceTemplate.position.buyWatchHigh"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                />
+              </div>
+              <div>
+                <label class="label">观察买入(中)仓位</label>
+                <input
+                  v-model.number="adviceTemplate.position.buyWatchMid"
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                />
+              </div>
+              <div>
+                <label class="label">减仓比例</label>
+                <input v-model.number="adviceTemplate.position.reduce" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label class="label">观望仓位</label>
+                <input v-model.number="adviceTemplate.position.watch" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label class="label">建仓一批比例</label>
+                <input v-model.number="adviceTemplate.entry.first" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label class="label">回踩加仓比例</label>
+                <input v-model.number="adviceTemplate.entry.pullback" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label class="label">突破加仓比例</label>
+                <input v-model.number="adviceTemplate.entry.breakout" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label class="label">止盈一批比例</label>
+                <input v-model.number="adviceTemplate.takeProfit.tp1" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label class="label">止盈二批比例</label>
+                <input v-model.number="adviceTemplate.takeProfit.tp2" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label class="label">止盈三批比例</label>
+                <input v-model.number="adviceTemplate.takeProfit.tp3" type="number" min="0" max="1" step="0.05" />
+              </div>
+              <div>
+                <label class="label">移动止损比例</label>
+                <input v-model.number="adviceTemplate.trailStopPct" type="number" min="0" max="1" step="0.01" />
+              </div>
+            </div>
+          </div>
           <div class="result-grid">
             <div>
               <p class="muted">建议动作</p>
@@ -203,6 +431,7 @@
             <div>
               <p class="muted">建议仓位</p>
               <p class="metric-value">{{ operationSuggestion.positionText }}</p>
+              <p class="muted">模板：{{ operationSuggestion.profileLabel || operationSuggestion.profileKey }}</p>
             </div>
             <div>
               <p class="muted">止损 / 止盈</p>
@@ -334,7 +563,7 @@
           <h2>参数交叉验证</h2>
           <p class="muted">多参数组合网格寻优。</p>
         </div>
-        <span class="pill">Grid</span>
+        <span class="pill">寻优</span>
       </header>
       <p class="panel-note">结果里的最佳参数可一键回填到回测；寻优范围越大运行越久。</p>
       <div class="toolbar strategy-merge-toggle">
@@ -457,6 +686,44 @@
           <label class="label">最大运行次数</label>
           <input v-model.number="gridForm.max_runs" type="number" min="1" />
         </div>
+        <div>
+          <label class="label">排序指标</label>
+          <select v-model="gridForm.ranking_metric" class="select">
+            <option value="profit">累计收益优先</option>
+            <option value="win_rate">胜率优先</option>
+            <option value="sharpe">夏普优先</option>
+            <option value="annual_return">年化收益优先</option>
+            <option value="custom">自定义指标</option>
+          </select>
+        </div>
+        <div v-if="gridForm.ranking_metric === 'custom'">
+          <label class="label">自定义: 收益权重</label>
+          <input v-model.number="gridForm.ranking_weights.profit" type="number" min="0" step="0.1" />
+        </div>
+        <div v-if="gridForm.ranking_metric === 'custom'">
+          <label class="label">自定义: 胜率权重</label>
+          <input v-model.number="gridForm.ranking_weights.win_rate" type="number" min="0" step="0.1" />
+        </div>
+        <div v-if="gridForm.ranking_metric === 'custom'">
+          <label class="label">自定义: 夏普权重</label>
+          <input v-model.number="gridForm.ranking_weights.sharpe" type="number" min="0" step="0.1" />
+        </div>
+        <div v-if="gridForm.ranking_metric === 'custom'">
+          <label class="label">自定义: 年化权重</label>
+          <input v-model.number="gridForm.ranking_weights.annual_return" type="number" min="0" step="0.1" />
+        </div>
+        <div v-if="gridForm.ranking_metric === 'custom'">
+          <label class="label">自定义: 回撤惩罚</label>
+          <input v-model.number="gridForm.ranking_weights.drawdown" type="number" min="0" step="0.1" />
+        </div>
+        <div>
+          <label class="label">前N股票数量</label>
+          <input v-model.number="gridForm.symbol_top_n" type="number" min="1" max="50" />
+        </div>
+        <div>
+          <label class="label">股票评估上限</label>
+          <input v-model.number="gridForm.symbol_eval_limit" type="number" min="10" max="500" />
+        </div>
         <div v-if="!gridUseBacktestBaseProxy">
           <label class="label">回溯年数</label>
           <input v-model.number="gridForm.n_folds" type="number" min="1" />
@@ -470,12 +737,123 @@
         <h3>最佳组合</h3>
         <div class="toolbar">
           <button class="btn-secondary" @click="applyGridToBacktest">应用到回测参数</button>
+          <button
+            v-if="gridNextParamSuggestions"
+            class="btn-secondary"
+            @click="applyGridNextSuggestions"
+          >
+            生成下一轮参数组合
+          </button>
           <span class="muted">自动填充买入周期/止损/止盈</span>
+        </div>
+        <div v-if="gridDiagnostics" class="info-card">
+          <div class="result-grid">
+            <div>
+              <p class="muted">候选组合</p>
+              <p class="mono">{{ gridDiagnostics.candidate_runs ?? '-' }}</p>
+            </div>
+            <div>
+              <p class="muted">已测试组合</p>
+              <p class="mono">{{ gridDiagnostics.tested_runs ?? '-' }}</p>
+            </div>
+            <div>
+              <p class="muted">是否完整测试</p>
+              <p class="mono">{{ gridDiagnostics.fully_tested ? '是' : '否' }}</p>
+            </div>
+            <div>
+              <p class="muted">是否被截断</p>
+              <p class="mono">{{ gridDiagnostics.truncated ? '是' : '否' }}</p>
+            </div>
+            <div>
+              <p class="muted">报错组合数</p>
+              <p class="mono">{{ gridDiagnostics.error_count ?? 0 }}</p>
+            </div>
+          </div>
+        </div>
+        <div v-if="gridRecommendation" class="info-card">
+          <p class="muted">推荐操作模式</p>
+          <p class="metric-value">{{ gridRecommendation.mode || '-' }}</p>
+          <p class="muted">
+            建议策略：{{ gridRecommendation.buy_strategy || '-' }} / {{ gridRecommendation.sell_strategy || '-' }}
+          </p>
+          <p class="muted">建议仓位区间：{{ gridRecommendation.position_range || '-' }}</p>
+          <p class="muted" v-if="gridRecommendation.notes?.length">
+            {{ gridRecommendation.notes.join('；') }}
+          </p>
+        </div>
+        <div v-if="gridErrors?.length" class="info-card">
+          <p class="muted">寻优报错样本（最多展示 {{ gridErrors.length }} 条）</p>
+          <div class="code-wrap">
+            <pre class="code">{{ JSON.stringify(gridErrors, null, 2) }}</pre>
+          </div>
         </div>
         <pre class="code">{{ gridSummaryText }}</pre>
       </div>
+      <div v-if="gridTopSymbols?.length" class="result-card">
+        <h3>最佳组合股票榜单（前 {{ gridTopSymbols.length }}）</h3>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>标的</th>
+                <th>胜率</th>
+                <th>累计盈亏</th>
+                <th>夏普</th>
+                <th>回撤</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in gridTopSymbols" :key="`grid-symbol-${row.rank}-${row.symbol}`">
+                <td class="mono">{{ row.rank }}</td>
+                <td class="mono">{{ row.symbol }}</td>
+                <td class="mono">{{ formatNumber(row.win_rate, 1) }}%</td>
+                <td class="mono">{{ formatNumber(row.profit_sum) }}</td>
+                <td class="mono">{{ formatNumber(row.sharpe, 2) }}</td>
+                <td class="mono">{{ formatNumber(row.max_drawdown, 3) }}</td>
+                <td>
+                  <button class="btn-secondary" @click="applySymbolToBacktest(row.symbol)">用于回测</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div v-if="gridActionableCandidates?.length" class="result-card">
+        <h3>近期可操作候选（最佳组合）</h3>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>标的</th>
+                <th>建议动作</th>
+                <th>建议仓位</th>
+                <th>胜率</th>
+                <th>止损/止盈</th>
+                <th>原因</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in gridActionableCandidates" :key="`grid-action-${row.symbol}`">
+                <td class="mono">{{ row.symbol }}</td>
+                <td>{{ row.action }}</td>
+                <td class="mono">{{ row.position_range }}</td>
+                <td class="mono">{{ formatNumber(row.win_rate, 1) }}%</td>
+                <td class="mono">{{ formatNumber(row.stop_loss) }} / {{ formatNumber(row.take_profit) }}</td>
+                <td>{{ row.reason }}</td>
+                <td class="table-actions">
+                  <button class="btn-secondary" @click="applySymbolToBacktest(row.symbol)">用于回测</button>
+                  <button class="btn-secondary" @click="applySymbolToAnalysis(row.symbol)">量化分析</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
       <div v-if="gridTopRuns?.length" class="result-card">
-        <h3>策略组合榜单（Top {{ gridTopRuns.length }}）</h3>
+        <h3>策略组合榜单（前 {{ gridTopRuns.length }}）</h3>
         <div class="table-wrap">
           <table class="table">
             <thead>
@@ -486,6 +864,7 @@
                 <th>收益</th>
                 <th>胜率</th>
                 <th>回撤</th>
+                <th>评分</th>
                 <th>参数</th>
                 <th>操作</th>
               </tr>
@@ -498,6 +877,7 @@
                 <td class="mono">{{ formatNumber(metricOf(row, 'profit_sum')) }}</td>
                 <td class="mono">{{ formatNumber(metricOf(row, 'win_rate'), 1) }}%</td>
                 <td class="mono">{{ formatNumber(metricOf(row, 'max_drawdown'), 3) }}</td>
+                <td class="mono">{{ formatNumber(row.score, 2) }}</td>
                 <td class="mono params-cell">{{ paramsBrief(row) }}</td>
                 <td>
                   <button class="btn-secondary" @click="applyGridRunToBacktest(row)">应用</button>
@@ -531,8 +911,17 @@ const props = defineProps({
   buyStrategyParams: Object,
   sellStrategyParams: Object,
   runBacktest: Function,
+  runStockSelect: Function,
+  runClosedLoop: Function,
   actionsBusy: Boolean,
   backtestSummary: Object,
+  backtestTopSymbols: Array,
+  backtestActionableCandidates: Array,
+  stockSelectSummary: Object,
+  stockSelectDiagnostics: Object,
+  stockSelectTopSymbols: Array,
+  stockSelectActionableCandidates: Array,
+  stockSelectRecommendation: Object,
   backtestTradeStats: Object,
   backtestSymbols: Array,
   chartSymbol: String,
@@ -546,6 +935,8 @@ const props = defineProps({
   klineData: Array,
   equityData: Array,
   operationSuggestion: Object,
+  adviceProfile: String,
+  adviceTemplates: Object,
   filteredOrders: Array,
   pagedOrders: Array,
   orderPage: Number,
@@ -561,10 +952,19 @@ const props = defineProps({
   showBacktestVisual: Boolean,
   runGridSearch: Function,
   gridSummary: Object,
+  gridDiagnostics: Object,
+  gridTopSymbols: Array,
+  gridActionableCandidates: Array,
+  gridRecommendation: Object,
+  gridErrors: Array,
+  gridNextParamSuggestions: Object,
   gridTopRuns: Array,
   gridSummaryText: String,
   applyGridToBacktest: Function,
   applyGridRunToBacktest: Function,
+  applyGridNextSuggestions: Function,
+  applySymbolToBacktest: Function,
+  applySymbolToAnalysis: Function,
   setKlineContainer: Function,
   setEquityContainer: Function
 })
@@ -572,6 +972,7 @@ const props = defineProps({
 const emit = defineEmits([
   'update:buyStrategyId',
   'update:sellStrategyId',
+  'update:adviceProfile',
   'update:gridUseBacktestBase',
   'update:gridExploreAllStrategies',
   'update:chartSymbol',
@@ -595,6 +996,11 @@ const sellStrategyIdProxy = computed({
 const chartSymbolProxy = computed({
   get: () => props.chartSymbol,
   set: (value) => emit('update:chartSymbol', value)
+})
+
+const adviceProfileProxy = computed({
+  get: () => props.adviceProfile || 'balanced',
+  set: (value) => emit('update:adviceProfile', value)
 })
 
 const gridUseBacktestBaseProxy = computed({
@@ -630,6 +1036,19 @@ const orderPageProxy = computed({
 const orderPageSizeProxy = computed({
   get: () => props.orderPageSize ?? 20,
   set: (value) => emit('update:orderPageSize', value)
+})
+
+const adviceProfileOptions = computed(() => {
+  const templates = props.adviceTemplates || {}
+  return Object.entries(templates).map(([key, template]) => ({
+    key,
+    label: template?.label || key
+  }))
+})
+
+const adviceTemplate = computed(() => {
+  const templates = props.adviceTemplates || {}
+  return templates[adviceProfileProxy.value] || null
 })
 
 const metricOf = (row, key) => {
