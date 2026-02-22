@@ -101,6 +101,7 @@
       :backtest-form="backtestForm"
       :grid-form="gridForm"
       v-model:grid-use-backtest-base="gridUseBacktestBase"
+      v-model:grid-explore-all-strategies="gridExploreAllStrategies"
       :buy-strategies="buyStrategies"
       :sell-strategies="sellStrategies"
       :active-buy-strategy="activeBuyStrategy"
@@ -142,8 +143,10 @@
       :show-backtest-visual="showBacktestVisual"
       :run-grid-search="runGridSearch"
       :grid-summary="gridSummary"
+      :grid-top-runs="gridTopRuns"
       :grid-summary-text="gridSummaryText"
       :apply-grid-to-backtest="applyGridToBacktest"
+      :apply-grid-run-to-backtest="applyGridRunToBacktest"
       :set-kline-container="setKlineContainer"
       :set-equity-container="setEquityContainer"
     />
@@ -265,6 +268,7 @@ const selectedOrder = ref(null)
 const showStopLines = ref(true)
 const analysisOverlayEnabled = ref(true)
 const gridUseBacktestBase = ref(true)
+const gridExploreAllStrategies = ref(true)
 const orderPage = ref(1)
 const orderPageSize = ref(20)
 const setKlineContainer = (el) => {
@@ -544,12 +548,40 @@ const chartWindow = reactive({
 })
 const hoverInfo = ref(null)
 
-const gridSummary = computed(() => {
-  const job =
-    store.activeJob && store.activeJob.type === 'grid_search'
-      ? store.activeJob
-      : latestJobByType('grid_search')
-  return job?.result?.best || null
+const gridJob = computed(() => {
+  if (store.activeJob && store.activeJob.type === 'grid_search') return store.activeJob
+  return latestJobByType('grid_search')
+})
+
+const gridSummary = computed(() => gridJob.value?.result?.best || null)
+
+const pickGridMetric = (run, key, fallback = 0) => {
+  if (!run) return fallback
+  const validationValue = run[`validation_${key}`]
+  if (validationValue !== undefined && validationValue !== null && Number.isFinite(Number(validationValue))) {
+    return Number(validationValue)
+  }
+  const raw = run[key]
+  if (raw !== undefined && raw !== null && Number.isFinite(Number(raw))) {
+    return Number(raw)
+  }
+  return fallback
+}
+
+const gridTopRuns = computed(() => {
+  const runs = Array.isArray(gridJob.value?.result?.runs) ? gridJob.value.result.runs : []
+  return runs.slice(0, 10).map((run, idx) => ({
+    ...run,
+    rank: idx + 1,
+    score: Number(
+      (
+        pickGridMetric(run, 'profit_sum') * 0.55 +
+        pickGridMetric(run, 'win_rate') * 0.25 +
+        pickGridMetric(run, 'sharpe') * 10 -
+        pickGridMetric(run, 'max_drawdown') * 100
+      ).toFixed(2)
+    )
+  }))
 })
 
 const analysisResult = computed(() => {
@@ -568,7 +600,7 @@ const analysisText = computed(() =>
 const operationSuggestion = computed(() => {
   const signal = analysisResult.value?.signal || null
   const stats = backtestTradeStats.value
-  const hasGridBest = !!gridSummary.value
+  const hasGridBest = !!gridSummary.value || gridTopRuns.value.length > 0
 
   let direction = 'watch'
   let reason = '暂无明确趋势信号，建议等待更清晰的突破或回踩确认。'
@@ -628,52 +660,113 @@ const operationSuggestion = computed(() => {
     )
   }
 
+  let positionPct = 0.1
+  if (direction === 'buy') positionPct = confidence === '高' ? 0.6 : 0.45
+  if (direction === 'buy_watch') positionPct = confidence === '高' ? 0.4 : 0.25
+  if (direction === 'reduce') positionPct = 0.2
+  if (direction === 'sell') positionPct = 0
+  if (stats?.winRate && stats.winRate < 45) positionPct = Math.max(0, positionPct - 0.1)
+  if (stats?.winRate && stats.winRate > 65) positionPct = Math.min(0.8, positionPct + 0.1)
+  if (signal?.last_close && signal?.stop_loss && signal.stop_loss >= signal.last_close) {
+    positionPct = Math.min(positionPct, 0.15)
+  }
+
+  const stopLoss = signal?.stop_loss ?? null
+  const takeProfit = signal?.take_profit ?? null
+  const lastClose = signal?.last_close ?? null
+  const delta =
+    Number.isFinite(Number(takeProfit)) && Number.isFinite(Number(lastClose))
+      ? Number(takeProfit) - Number(lastClose)
+      : null
+  const tp1 =
+    Number.isFinite(delta) && delta > 0 && Number.isFinite(Number(lastClose))
+      ? Number((Number(lastClose) + delta * 0.5).toFixed(2))
+      : takeProfit
+  const tp2 = Number.isFinite(Number(takeProfit)) ? Number(Number(takeProfit).toFixed(2)) : null
+  const tp3 =
+    Number.isFinite(delta) && delta > 0 && Number.isFinite(Number(takeProfit))
+      ? Number((Number(takeProfit) + delta * 0.5).toFixed(2))
+      : null
+
   return {
     direction,
     actionText: actionTextMap[direction] || actionTextMap.watch,
     confidence,
     reason,
     hint: hintParts.join('；'),
-    lastClose: signal?.last_close ?? null,
-    stopLoss: signal?.stop_loss ?? null,
-    takeProfit: signal?.take_profit ?? null
+    lastClose,
+    stopLoss,
+    takeProfit,
+    positionPct,
+    positionText: `${Math.round(positionPct * 100)}%`,
+    tranchePlan:
+      direction === 'buy' || direction === 'buy_watch'
+        ? [
+            { label: '首次建仓', ratio: 0.5, trigger: '当前价附近分批买入' },
+            { label: '回踩加仓', ratio: 0.3, trigger: '回踩支撑不破再加仓' },
+            { label: '突破加仓', ratio: 0.2, trigger: '放量突破阻力后加仓' }
+          ]
+        : [{ label: '防守仓位', ratio: 1, trigger: '以减仓和风控为主' }],
+    takeProfitPlan:
+      direction === 'buy' || direction === 'buy_watch'
+        ? [
+            { label: '止盈一', ratio: 0.4, target: tp1 },
+            { label: '止盈二', ratio: 0.4, target: tp2 },
+            { label: '止盈三', ratio: 0.2, target: tp3 }
+          ]
+        : [
+            { label: '减仓线', ratio: 0.5, target: signal?.resistance ?? null },
+            { label: '清仓线', ratio: 0.5, target: stopLoss }
+          ],
+    riskRule: {
+      hardStop: stopLoss,
+      trailStopPct: confidence === '高' ? 0.06 : 0.04
+    }
   }
 })
 
-const applyGridToBacktest = async () => {
-  if (!gridSummary.value) return
-  if (gridSummary.value.buy_strategy) {
-    buyStrategyId.value = gridSummary.value.buy_strategy
+const applyGridCandidateToBacktest = async (candidate) => {
+  if (!candidate) return
+  if (candidate.buy_strategy) {
+    buyStrategyId.value = candidate.buy_strategy
   }
-  if (gridSummary.value.sell_strategy) {
-    sellStrategyId.value = gridSummary.value.sell_strategy
+  if (candidate.sell_strategy) {
+    sellStrategyId.value = candidate.sell_strategy
   }
   await nextTick()
-  if (gridSummary.value.buy_params) {
+  if (candidate.buy_params) {
     resetStrategyParams(activeBuyStrategy.value, buyStrategyParams)
-    Object.assign(buyStrategyParams, gridSummary.value.buy_params)
-    if (gridSummary.value.buy_params.xd !== undefined) {
-      backtestForm.buy_xd = Number(gridSummary.value.buy_params.xd) || backtestForm.buy_xd
+    Object.assign(buyStrategyParams, candidate.buy_params)
+    if (candidate.buy_params.xd !== undefined) {
+      backtestForm.buy_xd = Number(candidate.buy_params.xd) || backtestForm.buy_xd
     }
   }
-  if (gridSummary.value.sell_params) {
+  if (candidate.sell_params) {
     resetStrategyParams(activeSellStrategy.value, sellStrategyParams)
-    Object.assign(sellStrategyParams, gridSummary.value.sell_params)
-    if (gridSummary.value.sell_params.stop_loss_n !== undefined) {
-      backtestForm.stop_loss_n = Number(gridSummary.value.sell_params.stop_loss_n)
+    Object.assign(sellStrategyParams, candidate.sell_params)
+    if (candidate.sell_params.stop_loss_n !== undefined) {
+      backtestForm.stop_loss_n = Number(candidate.sell_params.stop_loss_n)
     }
-    if (gridSummary.value.sell_params.stop_win_n !== undefined) {
-      backtestForm.stop_win_n = Number(gridSummary.value.sell_params.stop_win_n)
+    if (candidate.sell_params.stop_win_n !== undefined) {
+      backtestForm.stop_win_n = Number(candidate.sell_params.stop_win_n)
     }
   }
-  if (gridSummary.value.buy_xd) backtestForm.buy_xd = gridSummary.value.buy_xd
-  if (gridSummary.value.stop_loss_n !== undefined) backtestForm.stop_loss_n = gridSummary.value.stop_loss_n
-  if (gridSummary.value.stop_win_n !== undefined) backtestForm.stop_win_n = gridSummary.value.stop_win_n
-  if (Array.isArray(gridSummary.value.symbols) && gridSummary.value.symbols.length) {
-    backtestForm.symbols = gridSummary.value.symbols.join(', ')
+  if (candidate.buy_xd !== undefined) backtestForm.buy_xd = Number(candidate.buy_xd) || backtestForm.buy_xd
+  if (candidate.stop_loss_n !== undefined) backtestForm.stop_loss_n = Number(candidate.stop_loss_n)
+  if (candidate.stop_win_n !== undefined) backtestForm.stop_win_n = Number(candidate.stop_win_n)
+  if (Array.isArray(candidate.symbols) && candidate.symbols.length) {
+    backtestForm.symbols = candidate.symbols.join(', ')
   }
-  if (gridSummary.value.market) backtestForm.market = gridSummary.value.market
+  if (candidate.market) backtestForm.market = candidate.market
   activeTab.value = 'strategy'
+}
+
+const applyGridToBacktest = async () => {
+  await applyGridCandidateToBacktest(gridSummary.value)
+}
+
+const applyGridRunToBacktest = async (run) => {
+  await applyGridCandidateToBacktest(run)
 }
 
 watch(backtestSummary, (val) => {
@@ -1616,8 +1709,14 @@ const runBacktest = async () => {
 const runGridSearch = async () => {
   const buyGrid = buildGridParamPayload(activeBuyStrategy.value, gridBuyParamLists)
   const sellGrid = buildGridParamPayload(activeSellStrategy.value, gridSellParamLists)
-  const buyStrategyList = parseStringList(gridForm.buy_strategies)
-  const sellStrategyList = parseStringList(gridForm.sell_strategies)
+  const customBuyList = parseStringList(gridForm.buy_strategies)
+  const customSellList = parseStringList(gridForm.sell_strategies)
+  const buyStrategyList = gridExploreAllStrategies.value
+    ? buyStrategies.value.map((item) => item.id).filter(Boolean)
+    : customBuyList
+  const sellStrategyList = gridExploreAllStrategies.value
+    ? sellStrategies.value.map((item) => item.id).filter(Boolean)
+    : customSellList
   const baseMarket = gridUseBacktestBase.value ? backtestForm.market : gridForm.market
   const baseSymbols = gridUseBacktestBase.value ? backtestForm.symbols : gridForm.symbols
   const baseCash = gridUseBacktestBase.value ? backtestForm.cash : gridForm.cash

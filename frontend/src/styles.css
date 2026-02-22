@@ -615,6 +615,12 @@ select:focus {
   color: #0f172a;
 }
 
+.params-cell {
+  max-width: 360px;
+  white-space: normal;
+  word-break: break-word;
+}
+
 .backtest-visual .toolbar {
   align-items: flex-end;
 }

@@ -201,6 +201,10 @@
               <p class="metric-value">{{ formatNumber(operationSuggestion.lastClose) }}</p>
             </div>
             <div>
+              <p class="muted">建议仓位</p>
+              <p class="metric-value">{{ operationSuggestion.positionText }}</p>
+            </div>
+            <div>
               <p class="muted">止损 / 止盈</p>
               <p class="metric-value">
                 {{ formatNumber(operationSuggestion.stopLoss) }} / {{ formatNumber(operationSuggestion.takeProfit) }}
@@ -209,6 +213,52 @@
           </div>
           <p class="panel-note">{{ operationSuggestion.reason }}</p>
           <p class="muted" v-if="operationSuggestion.hint">{{ operationSuggestion.hint }}</p>
+          <div class="info-card" v-if="operationSuggestion.tranchePlan?.length">
+            <p class="muted">建仓规则</p>
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>批次</th>
+                    <th>仓位占比</th>
+                    <th>触发条件</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in operationSuggestion.tranchePlan" :key="`entry-${row.label}`">
+                    <td>{{ row.label }}</td>
+                    <td class="mono">{{ formatNumber((row.ratio || 0) * 100, 0) }}%</td>
+                    <td>{{ row.trigger }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="info-card" v-if="operationSuggestion.takeProfitPlan?.length">
+            <p class="muted">分批止盈</p>
+            <div class="table-wrap">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>批次</th>
+                    <th>减仓占比</th>
+                    <th>目标价</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in operationSuggestion.takeProfitPlan" :key="`tp-${row.label}`">
+                    <td>{{ row.label }}</td>
+                    <td class="mono">{{ formatNumber((row.ratio || 0) * 100, 0) }}%</td>
+                    <td class="mono">{{ formatNumber(row.target) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="muted">
+              硬止损：{{ formatNumber(operationSuggestion.riskRule?.hardStop) }}，
+              移动止损：{{ formatNumber((operationSuggestion.riskRule?.trailStopPct || 0) * 100, 0) }}%
+            </p>
+          </div>
         </div>
         <div v-if="filteredOrders.length" class="result-card">
           <h3>交易明细</h3>
@@ -291,6 +341,12 @@
         <label class="toggle">
           <input type="checkbox" v-model="gridUseBacktestBaseProxy" />
           <span>复用回测基础参数（市场、标的、资金、日期、年数）</span>
+        </label>
+      </div>
+      <div class="toolbar strategy-merge-toggle">
+        <label class="toggle">
+          <input type="checkbox" v-model="gridExploreAllStrategiesProxy" />
+          <span>自动探索全部买卖策略组合（用于筛选最优组合）</span>
         </label>
       </div>
       <div v-if="gridUseBacktestBaseProxy" class="selection strategy-shared-summary">
@@ -418,6 +474,39 @@
         </div>
         <pre class="code">{{ gridSummaryText }}</pre>
       </div>
+      <div v-if="gridTopRuns?.length" class="result-card">
+        <h3>策略组合榜单（Top {{ gridTopRuns.length }}）</h3>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>买入</th>
+                <th>卖出</th>
+                <th>收益</th>
+                <th>胜率</th>
+                <th>回撤</th>
+                <th>参数</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in gridTopRuns" :key="`grid-top-${row.rank}`">
+                <td class="mono">{{ row.rank }}</td>
+                <td class="mono">{{ row.buy_strategy }}</td>
+                <td class="mono">{{ row.sell_strategy }}</td>
+                <td class="mono">{{ formatNumber(metricOf(row, 'profit_sum')) }}</td>
+                <td class="mono">{{ formatNumber(metricOf(row, 'win_rate'), 1) }}%</td>
+                <td class="mono">{{ formatNumber(metricOf(row, 'max_drawdown'), 3) }}</td>
+                <td class="mono params-cell">{{ paramsBrief(row) }}</td>
+                <td>
+                  <button class="btn-secondary" @click="applyGridRunToBacktest(row)">应用</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   </section>
 </template>
@@ -430,6 +519,7 @@ const props = defineProps({
   backtestForm: Object,
   gridForm: Object,
   gridUseBacktestBase: Boolean,
+  gridExploreAllStrategies: Boolean,
   buyStrategies: Array,
   sellStrategies: Array,
   activeBuyStrategy: Object,
@@ -471,8 +561,10 @@ const props = defineProps({
   showBacktestVisual: Boolean,
   runGridSearch: Function,
   gridSummary: Object,
+  gridTopRuns: Array,
   gridSummaryText: String,
   applyGridToBacktest: Function,
+  applyGridRunToBacktest: Function,
   setKlineContainer: Function,
   setEquityContainer: Function
 })
@@ -481,6 +573,7 @@ const emit = defineEmits([
   'update:buyStrategyId',
   'update:sellStrategyId',
   'update:gridUseBacktestBase',
+  'update:gridExploreAllStrategies',
   'update:chartSymbol',
   'update:orderFilter',
   'update:selectedOrderKey',
@@ -509,6 +602,11 @@ const gridUseBacktestBaseProxy = computed({
   set: (value) => emit('update:gridUseBacktestBase', value)
 })
 
+const gridExploreAllStrategiesProxy = computed({
+  get: () => !!props.gridExploreAllStrategies,
+  set: (value) => emit('update:gridExploreAllStrategies', value)
+})
+
 const orderFilterProxy = computed({
   get: () => props.orderFilter,
   set: (value) => emit('update:orderFilter', value)
@@ -533,5 +631,21 @@ const orderPageSizeProxy = computed({
   get: () => props.orderPageSize ?? 20,
   set: (value) => emit('update:orderPageSize', value)
 })
+
+const metricOf = (row, key) => {
+  if (!row) return null
+  const validationValue = row[`validation_${key}`]
+  if (validationValue !== undefined && validationValue !== null) return Number(validationValue)
+  if (row[key] !== undefined && row[key] !== null) return Number(row[key])
+  return null
+}
+
+const paramsBrief = (row) => {
+  const buy = row?.buy_params ? Object.entries(row.buy_params).map(([k, v]) => `B.${k}:${v}`) : []
+  const sell = row?.sell_params ? Object.entries(row.sell_params).map(([k, v]) => `S.${k}:${v}`) : []
+  const merged = [...buy, ...sell]
+  if (!merged.length) return '-'
+  return merged.join(', ')
+}
 </script>
 
