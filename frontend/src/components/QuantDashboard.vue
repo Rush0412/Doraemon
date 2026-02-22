@@ -358,7 +358,7 @@ const gridForm = reactive({
   n_folds: 1,
   start: '',
   end: '',
-  max_runs: 30
+  max_runs: 50
 })
 if (!gridForm.ranking_weights || typeof gridForm.ranking_weights !== 'object') {
   gridForm.ranking_weights = {
