@@ -1,34 +1,33 @@
-<template>
+﻿<template>
   <div class="quant-shell">
     <section class="hero">
       <div class="hero-head">
         <div>
-          <p class="eyebrow">量化任务中心</p>
-          <h1>量化交易指挥台</h1>
+          <p class="eyebrow">閲忓寲浠诲姟涓績</p>
+          <h1>閲忓寲浜ゆ槗鎸囨尌鍙?/h1>
           <p class="hero-sub">
-            数据更新、策略回测、参数寻优、量化分析与当日建议的一体化闭环。
-          </p>
+            鏁版嵁鏇存柊銆佺瓥鐣ュ洖娴嬨€佸弬鏁板浼樸€侀噺鍖栧垎鏋愪笌褰撴棩寤鸿鐨勪竴浣撳寲闂幆銆?          </p>
         </div>
         <div class="hero-actions">
-          <button class="btn-ghost" @click="refreshJobs" :disabled="actionsBusy">刷新任务</button>
-          <button class="btn-primary" @click="runVerify" :disabled="actionsBusy">环境验证</button>
+          <button class="btn-ghost" @click="refreshJobs" :disabled="actionsBusy">鍒锋柊浠诲姟</button>
+          <button class="btn-primary" @click="runVerify" :disabled="actionsBusy">鐜楠岃瘉</button>
         </div>
       </div>
       <div class="hero-metrics">
         <div class="metric-card">
-          <p class="metric-label">任务总数</p>
+          <p class="metric-label">浠诲姟鎬绘暟</p>
           <p class="metric-value">{{ jobStats.total }}</p>
         </div>
         <div class="metric-card">
-          <p class="metric-label">运行中</p>
+          <p class="metric-label">杩愯涓?/p>
           <p class="metric-value">{{ jobStats.running }}</p>
         </div>
         <div class="metric-card">
-          <p class="metric-label">成功</p>
+          <p class="metric-label">鎴愬姛</p>
           <p class="metric-value">{{ jobStats.succeeded }}</p>
         </div>
         <div class="metric-card">
-          <p class="metric-label">失败</p>
+          <p class="metric-label">澶辫触</p>
           <p class="metric-value">{{ jobStats.failed }}</p>
         </div>
       </div>
@@ -49,13 +48,13 @@
       </div>
       <div class="flow-context">
         <div>
-          <p class="eyebrow">当前步骤</p>
+          <p class="eyebrow">褰撳墠姝ラ</p>
           <h2>{{ activeTabMeta.title }}</h2>
           <p class="muted">{{ activeTabMeta.hint }}</p>
         </div>
         <div class="flow-actions">
-          <button class="btn-secondary" @click="goPrev" :disabled="isFirstTab">上一步</button>
-          <button class="btn-primary" @click="goNext" :disabled="isLastTab">下一步</button>
+          <button class="btn-secondary" @click="goPrev" :disabled="isFirstTab">涓婁竴姝?/button>
+          <button class="btn-primary" @click="goNext" :disabled="isLastTab">涓嬩竴姝?/button>
         </div>
       </div>
     </section>
@@ -190,6 +189,29 @@
       :actions-busy="actionsBusy"
     />
 
+    <MlPanel
+      :active="activeTab === 'ml'"
+      :actions-busy="actionsBusy"
+      :ml-running="mlRunning"
+      :ml-loading="store.mlLoading"
+      :ml-error="store.mlError"
+      :ml-feature-form="mlFeatureForm"
+      :ml-train-form="mlTrainForm"
+      :ml-predict-form="mlPredictForm"
+      :ml-feature-result="mlFeatureResult"
+      :ml-train-result="mlTrainResult"
+      :ml-predict-result="mlPredictResult"
+      :ml-models="store.mlModels"
+      :ml-predictions="store.mlPredictions"
+      :run-ml-feature-build="runMlFeatureBuild"
+      :run-ml-train="runMlTrain"
+      :run-ml-predict="runMlPredict"
+      :run-ml-pipeline="runMlPipeline"
+      :refresh-ml-data="refreshMlData"
+      :promote-ml-model="promoteMlModel"
+      :apply-prediction-to-backtest="applyPredictionToBacktest"
+    />
+
 
     <JobsPanel
       :active="activeTab === 'jobs'"
@@ -212,6 +234,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import PreparePanel from './quant/PreparePanel.vue'
 import StrategyPanel from './quant/StrategyPanel.vue'
 import AnalysisPanel from './quant/AnalysisPanel.vue'
+import MlPanel from './quant/MlPanel.vue'
 import JobsPanel from './quant/JobsPanel.vue'
 import { useBacktestCharts } from './quant/composables/useBacktestCharts'
 import { useOperationSuggestion } from './quant/composables/useOperationSuggestion'
@@ -251,8 +274,8 @@ const tabs = [
   {
     id: 'strategy',
     step: '02',
-    title: '回测与寻优',
-    subtitle: '验证策略',
+    title: '策略验证',
+    subtitle: '回测与寻优',
     hint: '执行历史回测、参数交叉验证，并将最优组合应用到回测。'
   },
   {
@@ -263,8 +286,15 @@ const tabs = [
     hint: '运行支撑阻力、跳空、趋势速度等工具，生成交易信号。'
   },
   {
-    id: 'jobs',
+    id: 'ml',
     step: '04',
+    title: 'ML 模型',
+    subtitle: '特征训练与预测',
+    hint: '构建特征、训练模型、生成预测并输出操作建议。'
+  },
+  {
+    id: 'jobs',
+    step: '05',
     title: '任务中心',
     subtitle: '状态与导出',
     hint: '查看任务状态、结果明细并导出。'
@@ -302,6 +332,7 @@ const analysisOverlayEnabled = ref(true)
 const gridUseBacktestBase = ref(true)
 const gridExploreAllStrategies = ref(true)
 const flowRunning = ref(false)
+const mlRunning = ref(false)
 const orderPage = ref(1)
 const orderPageSize = ref(20)
 
@@ -402,6 +433,38 @@ const toolOptions = reactive({
   corr_type: 'pears',
   distance_type: 'manhattan',
   field: 'p_change'
+})
+
+const mlFeatureForm = reactive({
+  market: market.value,
+  symbols: '',
+  feature_version: 'v1',
+  min_rows: 120,
+  symbol_limit: 300,
+  start: '',
+  end: ''
+})
+
+const mlTrainForm = reactive({
+  market: market.value,
+  feature_version: 'v1',
+  target: 'y_up_5d',
+  train_ratio: 0.8,
+  max_samples: 300000,
+  model_name: '',
+  max_iter: 300,
+  learning_rate: 0.05,
+  max_depth: 6,
+  min_samples_leaf: 30,
+  l2_regularization: 0
+})
+
+const mlPredictForm = reactive({
+  market: market.value,
+  target: 'y_up_5d',
+  model_id: null,
+  symbols: '',
+  limit: 20
 })
 
 const formatSelectedSymbol = (symbol, fallbackMarket = backtestForm.market) =>
@@ -1118,7 +1181,7 @@ const invertPage = () => {
 }
 
 const saveSelection = () => {
-  const name = window.prompt('保存组合名称')
+  const name = window.prompt('淇濆瓨缁勫悎鍚嶇О')
   if (!name) return
   const trimmed = name.trim()
   if (!trimmed) return
@@ -1198,7 +1261,7 @@ const waitForJobDone = async (jobId, timeoutMs = 20 * 60 * 1000, pollMs = 1200) 
     if (current?.id === jobId && (current.status === 'succeeded' || current.status === 'failed')) {
       await store.fetchJobs(120, { silent: true })
       if (current.status === 'failed') {
-        throw new Error(current.error || `任务 ${jobId} 执行失败`)
+        throw new Error(current.error || `浠诲姟 ${jobId} 鎵ц澶辫触`)
       }
       return current
     }
@@ -1210,7 +1273,7 @@ const waitForJobDone = async (jobId, timeoutMs = 20 * 60 * 1000, pollMs = 1200) 
     await sleep(delayMs)
     delayMs = Math.min(Math.round(delayMs * 1.35), 5000)
   }
-  throw new Error(`任务 ${jobId} 超时未完成`)
+  throw new Error(`浠诲姟 ${jobId} 瓒呮椂鏈畬鎴恅)
 }
 
 const buildBacktestPayload = () => {
@@ -1371,7 +1434,7 @@ const runClosedLoop = async () => {
       ? selectResult.top_symbols.map((item) => String(item.symbol || '').trim()).filter(Boolean)
       : []
     if (!topSymbols.length) {
-      throw new Error('独立选股未返回可回测标的，请调整范围后重试。')
+      throw new Error('鐙珛閫夎偂鏈繑鍥炲彲鍥炴祴鏍囩殑锛岃璋冩暣鑼冨洿鍚庨噸璇曘€?)
     }
 
     const picked = topSymbols.slice(0, Math.max(1, Number(gridForm.symbol_top_n || 10)))

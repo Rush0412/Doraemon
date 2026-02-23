@@ -19,7 +19,11 @@ export const useQuantStore = defineStore('quant', {
     activeJobLoading: false,
     strategies: { buy: [], sell: [] },
     strategiesLoading: false,
-    strategiesError: null
+    strategiesError: null,
+    mlModels: [],
+    mlPredictions: [],
+    mlLoading: false,
+    mlError: null
   }),
   actions: {
     _upsertJob(job) {
@@ -148,6 +152,59 @@ export const useQuantStore = defineStore('quant', {
       this.activeJob = job
       this._upsertJob(job)
       return job
+    },
+    async startMlFeatureBuild(params = {}) {
+      const { data } = await api.post('/quant/ml/features/build', params)
+      const job = data.data
+      this.activeJob = job
+      this._upsertJob(job)
+      return job
+    },
+    async startMlTrain(params = {}) {
+      const { data } = await api.post('/quant/ml/train', params)
+      const job = data.data
+      this.activeJob = job
+      this._upsertJob(job)
+      return job
+    },
+    async startMlPredict(params = {}) {
+      const { data } = await api.post('/quant/ml/predict', params)
+      const job = data.data
+      this.activeJob = job
+      this._upsertJob(job)
+      return job
+    },
+    async fetchMlModels({ market = 'CN', target = 'y_up_5d', limit = 100 } = {}) {
+      this.mlLoading = true
+      this.mlError = null
+      try {
+        const { data } = await api.get('/quant/ml/models', {
+          params: { market, target, limit }
+        })
+        this.mlModels = Array.isArray(data.data) ? data.data : []
+      } catch (err) {
+        this.mlError = err.message
+      } finally {
+        this.mlLoading = false
+      }
+    },
+    async fetchMlPredictions({ market = 'CN', modelId = null, limit = 100 } = {}) {
+      this.mlLoading = true
+      this.mlError = null
+      try {
+        const params = { market, limit }
+        if (modelId) params.model_id = modelId
+        const { data } = await api.get('/quant/ml/predictions', { params })
+        this.mlPredictions = Array.isArray(data.data) ? data.data : []
+      } catch (err) {
+        this.mlError = err.message
+      } finally {
+        this.mlLoading = false
+      }
+    },
+    async promoteMlModel(modelId) {
+      const { data } = await api.post(`/quant/ml/models/${modelId}/promote`)
+      return data.data
     },
     async fetchStrategies() {
       this.strategiesLoading = true
