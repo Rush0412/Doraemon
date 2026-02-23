@@ -323,3 +323,176 @@ def load_klines(
     stmt = stmt.order_by(models.StockKline.trade_date)
     result = db.execute(stmt)
     return result.scalars().all()
+
+
+def upsert_ml_feature_rows(db: Session, rows: list[dict]) -> int:
+    rows = _dedupe_rows(rows, ("market", "symbol", "trade_date", "feature_version"))
+    if not rows:
+        return 0
+    stmt = pg_insert(models.MLFeatureSnapshot).values(rows)
+    update_cols = {
+        col.name: getattr(stmt.excluded, col.name)
+        for col in models.MLFeatureSnapshot.__table__.columns
+        if col.name not in {"id", "created_at"}
+    }
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["market", "symbol", "trade_date", "feature_version"],
+        set_=update_cols,
+    )
+    result = db.execute(stmt)
+    db.commit()
+    return result.rowcount or 0
+
+
+def list_ml_feature_snapshots(
+    db: Session,
+    market: str,
+    feature_version: str = "v1",
+    symbols: Optional[list[str]] = None,
+    limit: int = 200000,
+) -> list[models.MLFeatureSnapshot]:
+    stmt = select(models.MLFeatureSnapshot).where(
+        models.MLFeatureSnapshot.market == market,
+        models.MLFeatureSnapshot.feature_version == feature_version,
+    )
+    if symbols:
+        stmt = stmt.where(models.MLFeatureSnapshot.symbol.in_(symbols))
+    stmt = stmt.order_by(models.MLFeatureSnapshot.trade_date.asc()).limit(max(1, limit))
+    result = db.execute(stmt)
+    return result.scalars().all()
+
+
+def list_latest_ml_feature_snapshots(
+    db: Session,
+    market: str,
+    feature_version: str = "v1",
+    symbols: Optional[list[str]] = None,
+    limit: int = 500,
+) -> list[models.MLFeatureSnapshot]:
+    base_filters = [
+        models.MLFeatureSnapshot.market == market,
+        models.MLFeatureSnapshot.feature_version == feature_version,
+    ]
+    if symbols:
+        base_filters.append(models.MLFeatureSnapshot.symbol.in_(symbols))
+
+    subq = (
+        select(
+            models.MLFeatureSnapshot.symbol.label("symbol"),
+            func.max(models.MLFeatureSnapshot.trade_date).label("trade_date"),
+        )
+        .where(*base_filters)
+        .group_by(models.MLFeatureSnapshot.symbol)
+        .subquery()
+    )
+
+    stmt = (
+        select(models.MLFeatureSnapshot)
+        .join(
+            subq,
+            and_(
+                models.MLFeatureSnapshot.symbol == subq.c.symbol,
+                models.MLFeatureSnapshot.trade_date == subq.c.trade_date,
+            ),
+        )
+        .where(*base_filters)
+        .order_by(models.MLFeatureSnapshot.trade_date.desc(), models.MLFeatureSnapshot.symbol.asc())
+        .limit(max(1, limit))
+    )
+    result = db.execute(stmt)
+    return result.scalars().all()
+
+
+def create_ml_model(db: Session, payload: dict) -> models.MLModel:
+    model = models.MLModel(**payload)
+    db.add(model)
+    db.commit()
+    db.refresh(model)
+    return model
+
+
+def list_ml_models(
+    db: Session,
+    market: Optional[str] = None,
+    target: Optional[str] = None,
+    limit: int = 100,
+) -> list[models.MLModel]:
+    stmt = select(models.MLModel)
+    if market:
+        stmt = stmt.where(models.MLModel.market == market)
+    if target:
+        stmt = stmt.where(models.MLModel.target == target)
+    stmt = stmt.order_by(models.MLModel.id.desc()).limit(max(1, limit))
+    result = db.execute(stmt)
+    return result.scalars().all()
+
+
+def get_ml_model(db: Session, model_id: int) -> Optional[models.MLModel]:
+    return db.get(models.MLModel, model_id)
+
+
+def get_active_ml_model(db: Session, market: str, target: str = "y_up_5d") -> Optional[models.MLModel]:
+    stmt = (
+        select(models.MLModel)
+        .where(
+            models.MLModel.market == market,
+            models.MLModel.target == target,
+            models.MLModel.is_active.is_(True),
+        )
+        .order_by(models.MLModel.id.desc())
+        .limit(1)
+    )
+    result = db.execute(stmt)
+    return result.scalars().first()
+
+
+def set_ml_model_active(db: Session, model: models.MLModel) -> models.MLModel:
+    # deactivate same market+target active models first
+    stmt = select(models.MLModel).where(
+        models.MLModel.market == model.market,
+        models.MLModel.target == model.target,
+        models.MLModel.is_active.is_(True),
+    )
+    for item in db.execute(stmt).scalars().all():
+        item.is_active = False
+        db.add(item)
+
+    model.is_active = True
+    model.status = "active"
+    db.add(model)
+    db.commit()
+    db.refresh(model)
+    return model
+
+
+def upsert_ml_predictions(db: Session, rows: list[dict]) -> int:
+    rows = _dedupe_rows(rows, ("model_id", "symbol", "trade_date"))
+    if not rows:
+        return 0
+    stmt = pg_insert(models.MLPrediction).values(rows)
+    update_cols = {
+        col.name: getattr(stmt.excluded, col.name)
+        for col in models.MLPrediction.__table__.columns
+        if col.name not in {"id", "created_at"}
+    }
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["model_id", "symbol", "trade_date"],
+        set_=update_cols,
+    )
+    result = db.execute(stmt)
+    db.commit()
+    return result.rowcount or 0
+
+
+def list_latest_ml_predictions(
+    db: Session,
+    market: str,
+    model_id: Optional[int] = None,
+    limit: int = 100,
+) -> list[models.MLPrediction]:
+    stmt = select(models.MLPrediction).where(models.MLPrediction.market == market)
+    if model_id:
+        stmt = stmt.where(models.MLPrediction.model_id == model_id)
+    stmt = stmt.order_by(models.MLPrediction.trade_date.desc(), models.MLPrediction.score_up_5d.desc()).limit(max(1, limit))
+    result = db.execute(stmt)
+    return result.scalars().all()

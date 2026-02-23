@@ -1118,7 +1118,7 @@ const invertPage = () => {
 }
 
 const saveSelection = () => {
-  const name = window.prompt('淇濆瓨缁勫悎鍚嶇О')
+  const name = window.prompt('保存组合名称')
   if (!name) return
   const trimmed = name.trim()
   if (!trimmed) return
@@ -1190,17 +1190,25 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 const waitForJobDone = async (jobId, timeoutMs = 20 * 60 * 1000, pollMs = 1200) => {
   const startedAt = Date.now()
+  let delayMs = Math.max(600, Number(pollMs || 1200))
+  let nextJobsRefreshAt = startedAt
   while (Date.now() - startedAt <= timeoutMs) {
-    await store.fetchJob(jobId)
+    await store.fetchJob(jobId, { silent: true })
     const current = store.activeJob
     if (current?.id === jobId && (current.status === 'succeeded' || current.status === 'failed')) {
-      await store.fetchJobs()
+      await store.fetchJobs(120, { silent: true })
       if (current.status === 'failed') {
         throw new Error(current.error || `任务 ${jobId} 执行失败`)
       }
       return current
     }
-    await sleep(pollMs)
+    const now = Date.now()
+    if (now >= nextJobsRefreshAt) {
+      store.fetchJobs(120, { silent: true }).catch(() => {})
+      nextJobsRefreshAt = now + 10000
+    }
+    await sleep(delayMs)
+    delayMs = Math.min(Math.round(delayMs * 1.35), 5000)
   }
   throw new Error(`任务 ${jobId} 超时未完成`)
 }
@@ -1551,5 +1559,4 @@ onBeforeUnmount(() => {
   cleanupCharts()
 })
 </script>
-
 

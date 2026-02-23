@@ -86,6 +86,46 @@ def start_quant_tools(payload: dict, db: Session = Depends(get_db)):
     return service.start_quant_tools(payload, db)
 
 
+@quant_router.post("/ml/features/build", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
+def start_ml_feature_build(payload: dict, db: Session = Depends(get_db)):
+    return service.start_ml_feature_build(payload, db)
+
+
+@quant_router.post("/ml/train", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
+def start_ml_train(payload: dict, db: Session = Depends(get_db)):
+    return service.start_ml_train(payload, db)
+
+
+@quant_router.post("/ml/predict", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
+def start_ml_predict(payload: dict, db: Session = Depends(get_db)):
+    return service.start_ml_predict(payload, db)
+
+
+@quant_router.get("/ml/models", response_model=schemas.APIResponse)
+def list_ml_models(
+    market: str = "CN",
+    target: str = "y_up_5d",
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    return service.list_ml_models(db, market=market, target=target, limit=limit)
+
+
+@quant_router.post("/ml/models/{model_id}/promote", response_model=schemas.APIResponse)
+def promote_ml_model(model_id: int, db: Session = Depends(get_db)):
+    return service.promote_ml_model(model_id, db)
+
+
+@quant_router.get("/ml/predictions", response_model=schemas.APIResponse)
+def list_ml_predictions(
+    market: str = "CN",
+    model_id: Optional[int] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+):
+    return service.list_ml_predictions(db, market=market, model_id=model_id, limit=limit)
+
+
 @quant_router.get("/verify", response_model=schemas.APIResponse)
 def verify_quant_env(db: Session = Depends(get_db)):
     return service.verify_quant_env(db)

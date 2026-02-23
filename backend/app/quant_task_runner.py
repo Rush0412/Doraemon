@@ -1,6 +1,7 @@
 ﻿from . import crud
 from .database import SessionLocal
 from .quant_analysis_service import _run_analysis_job
+from .quant_ml_pipeline import run_ml_feature_job, run_ml_predict_job, run_ml_train_job
 import json
 from datetime import datetime
 
@@ -668,6 +669,21 @@ def _run_job(job_id: int):
             crud.set_quant_job_result(db, job, result)
             return
 
+        if job.type == "ml_feature":
+            result = run_ml_feature_job(job.params or {}, db)
+            crud.set_quant_job_result(db, job, result)
+            return
+
+        if job.type == "ml_train":
+            result = run_ml_train_job(job.params or {}, db)
+            crud.set_quant_job_result(db, job, result)
+            return
+
+        if job.type == "ml_predict":
+            result = run_ml_predict_job(job.params or {}, db)
+            crud.set_quant_job_result(db, job, result)
+            return
+
         if job.type == "verify":
             import platform
 
@@ -709,9 +725,4 @@ def _run_job(job_id: int):
             crud.set_quant_job_error(db, job, str(exc))
     finally:
         db.close()
-
-
-
-
-
 

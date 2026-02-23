@@ -35,3 +35,15 @@ def start_quant_tools(payload: dict, db: Session = Depends(get_db)):
 
 def verify_quant_env(db: Session = Depends(get_db)):
     return _enqueue_job("verify", {}, db)
+
+
+def start_ml_feature_build(payload: dict, db: Session = Depends(get_db)):
+    return _enqueue_job("ml_feature", payload, db)
+
+
+def start_ml_train(payload: dict, db: Session = Depends(get_db)):
+    return _enqueue_job("ml_train", payload, db)
+
+
+def start_ml_predict(payload: dict, db: Session = Depends(get_db)):
+    return _enqueue_job("ml_predict", payload, db)

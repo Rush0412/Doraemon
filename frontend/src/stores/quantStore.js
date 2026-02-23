@@ -22,6 +22,12 @@ export const useQuantStore = defineStore('quant', {
     strategiesError: null
   }),
   actions: {
+    _upsertJob(job) {
+      if (!job || typeof job !== 'object') return
+      const rows = Array.isArray(this.jobs) ? this.jobs : []
+      const rest = rows.filter((item) => item?.id !== job.id)
+      this.jobs = [job, ...rest]
+    },
     async searchSymbols({ market, q, kind, page, pageSize } = {}) {
       const nextMarket = market ?? this.market
       const nextQuery = q ?? this.query
@@ -57,8 +63,9 @@ export const useQuantStore = defineStore('quant', {
         this.symbolsLoading = false
       }
     },
-    async fetchJobs(limit = 50) {
-      this.jobsLoading = true
+    async fetchJobs(limit = 50, options = {}) {
+      const silent = !!options.silent
+      if (!silent) this.jobsLoading = true
       this.jobsError = null
       try {
         const { data } = await api.get('/jobs/', { params: { limit } })
@@ -66,16 +73,18 @@ export const useQuantStore = defineStore('quant', {
       } catch (err) {
         this.jobsError = err.message
       } finally {
-        this.jobsLoading = false
+        if (!silent) this.jobsLoading = false
       }
     },
-    async fetchJob(id) {
-      this.activeJobLoading = true
+    async fetchJob(id, options = {}) {
+      const silent = !!options.silent
+      if (!silent) this.activeJobLoading = true
       try {
         const { data } = await api.get(`/jobs/${id}`)
         this.activeJob = data.data
+        this._upsertJob(data.data)
       } finally {
-        this.activeJobLoading = false
+        if (!silent) this.activeJobLoading = false
       }
     },
     async deleteJob(id) {
@@ -89,21 +98,21 @@ export const useQuantStore = defineStore('quant', {
       const { data } = await api.get('/quant/verify')
       const job = data.data
       this.activeJob = job
-      await this.fetchJobs()
+      this._upsertJob(job)
       return job
     },
     async startKlUpdate(params = {}) {
       const { data } = await api.post('/quant/kl/update', params)
       const job = data.data
       this.activeJob = job
-      await this.fetchJobs()
+      this._upsertJob(job)
       return job
     },
     async startBacktest(params = {}) {
       const { data } = await api.post('/quant/backtest', params)
       const job = data.data
       this.activeJob = job
-      await this.fetchJobs()
+      this._upsertJob(job)
       return job
     },
     async importSymbols(market = 'CN') {
@@ -123,21 +132,21 @@ export const useQuantStore = defineStore('quant', {
       const { data } = await api.post('/quant/grid-search', params)
       const job = data.data
       this.activeJob = job
-      await this.fetchJobs()
+      this._upsertJob(job)
       return job
     },
     async startStockSelect(params = {}) {
       const { data } = await api.post('/quant/stock-select', params)
       const job = data.data
       this.activeJob = job
-      await this.fetchJobs()
+      this._upsertJob(job)
       return job
     },
     async startQuantTool(params = {}) {
       const { data } = await api.post('/quant/tools', params)
       const job = data.data
       this.activeJob = job
-      await this.fetchJobs()
+      this._upsertJob(job)
       return job
     },
     async fetchStrategies() {
