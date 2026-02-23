@@ -79,9 +79,9 @@ def calc_jump(kl_pd, jump_diff_factor=1, show=True):
     # 使用使用kl_pd没有resample之前的index和change_mean进行loc操作，为了把没有的index都变成nan
     change_mean = change_mean.loc[kl_pd.index]
     # 有nan之后开始填充nan
-    change_mean.fillna(method='pad', inplace=True)
+    change_mean = change_mean.ffill()
     # bfill再来一遍只是为了填充最前面的nan
-    change_mean.fillna(method='bfill', inplace=True)
+    change_mean = change_mean.bfill()
     """
         loc以及填充nan后change_mean形如：change_mean
         2014-07-23    0.7940
@@ -109,9 +109,9 @@ def calc_jump(kl_pd, jump_diff_factor=1, show=True):
     # 使用使用kl_pd没有resample之前的index和change_mean进行loc操作，为了把没有的index都变成nan
     volume_mean = volume_mean.loc[kl_pd.index]
     # 有nan之后开始填充nan
-    volume_mean.fillna(method='pad', inplace=True)
+    volume_mean = volume_mean.ffill()
     # bfill再来一遍只是为了填充最前面的nan
-    volume_mean.fillna(method='bfill', inplace=True)
+    volume_mean = volume_mean.bfill()
     """
         loc以及填充nan后volume_mean形如：change_mean
         2014-07-23    1350679.0
@@ -136,7 +136,7 @@ def calc_jump(kl_pd, jump_diff_factor=1, show=True):
         2016-07-25    1136278.0
         2016-07-26    1136278.0
     """
-    jump_pd = pd.DataFrame()
+    jump_frames = []
 
     # 迭代金融时间序列，即针对每一个交易日分析跳空
     for kl_index in np.arange(0, kl_pd.shape[0]):
@@ -170,7 +170,7 @@ def calc_jump(kl_pd, jump_diff_factor=1, show=True):
             # 计算出跳空缺口强度
             today['jump_power'] = (today.low - today.pre_close) / jump_diff
 
-            jump_pd = jump_pd.append(today)
+            jump_frames.append(today.to_frame().T)
         elif today.p_change < 0 and (today.pre_close - today.high) > jump_diff:
             # 注意向下跳空判断使用today.high，向下跳空 －1
             today['jump'] = -1
@@ -180,7 +180,9 @@ def calc_jump(kl_pd, jump_diff_factor=1, show=True):
             today['jump_diff'] = jump_diff
             # 计算出跳空缺口强度
             today['jump_power'] = (today.pre_close - today.high) / jump_diff
-            jump_pd = jump_pd.append(today)
+            jump_frames.append(today.to_frame().T)
+
+    jump_pd = pd.concat(jump_frames) if len(jump_frames) > 0 else pd.DataFrame()
 
     if show:
         # 通过plot_candle_form_klpd可视化跳空缺口，通过view_indexs参数

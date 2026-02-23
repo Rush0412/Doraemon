@@ -121,8 +121,7 @@ def atr14_min(high, low, close):
     :return: atr值序列，atr14序列中的最小值，float
     """
     _atr14 = atr14(high, low, close)
-    _atr14 = pd.Series(_atr14)
-    _atr14.fillna(method='bfill', inplace=True)
+    _atr14 = pd.Series(_atr14).bfill()
     _atr14 = _atr14.min()
     return _atr14
 
@@ -136,8 +135,7 @@ def atr14_max(high, low, close):
     :return: atr值序列，atr14序列中的最大值，float
     """
     _atr14 = atr14(high, low, close)
-    _atr14 = pd.Series(_atr14)
-    _atr14.fillna(method='bfill', inplace=True)
+    _atr14 = pd.Series(_atr14).bfill()
     _atr14 = _atr14.max()
     return _atr14
 
@@ -151,8 +149,7 @@ def atr21_min(high, low, close):
     :return: atr值序列，atr21序列中的最小值，float
     """
     _atr21 = atr21(high, low, close)
-    _atr21 = pd.Series(_atr21)
-    _atr21.fillna(method='bfill', inplace=True)
+    _atr21 = pd.Series(_atr21).bfill()
     _atr21 = _atr21.min()
     return _atr21
 
@@ -166,8 +163,7 @@ def atr21_max(high, low, close):
     :return: atr值序列，atr21序列中的最大值，float
     """
     _atr21 = atr21(high, low, close)
-    _atr21 = pd.Series(_atr21)
-    _atr21.fillna(method='bfill', inplace=True)
+    _atr21 = pd.Series(_atr21).bfill()
     _atr21 = _atr21.max()
     return _atr21
 

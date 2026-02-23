@@ -127,7 +127,7 @@ def merge_stock_info_to_stock_list(market=('US', 'HK', 'CN')):
         for key in extra_info:
             stock_df[key] = extra_info[key]
 
-        stock_df.fillna('-', inplace=True)
+        stock_df = stock_df.fillna('-')
         # 某些symbol的stockinfo为空，，stockinfp为空的原因是stockinfo页面404，因此可以丢弃
         valid_df = stock_df.loc[stock_df.symbol != '-']
         valid_df.to_csv(map_stock_list_rom(m), index=False, encoding='utf-8')

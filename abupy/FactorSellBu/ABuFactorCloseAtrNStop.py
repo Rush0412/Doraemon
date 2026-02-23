@@ -45,7 +45,10 @@ class AbuFactorCloseAtrNStop(AbuFactorSellBase):
         for order in orders:
             # 通过order中的买入日期计算金融时间序列kl_pd中的index
             mask_date = self.kl_pd['date'] == order.buy_date
-            start_ind = int(self.kl_pd[mask_date]['key'].values)
+            key_series = self.kl_pd.loc[mask_date, 'key']
+            if key_series.empty:
+                continue
+            start_ind = int(key_series.iloc[0])
             end_ind = self.today_ind + 1
 
             """

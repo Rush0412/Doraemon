@@ -160,7 +160,7 @@ def sample_712_3(show=True):
     # 由于假设都是全仓操作所以signal＝keep，即1代表买入持有，0代表卖出空仓
     test_kl['keep'] = test_kl['signal']
     # 将keep列中的nan使用向下填充的方式填充，结果使keep可以代表最终的交易持股状态
-    test_kl['keep'].fillna(method='ffill', inplace=True)
+    test_kl['keep'] = test_kl['keep'].ffill()
 
     # shift(1)及np.log下面会有内容详细讲解
     test_kl['benchmark_profit'] = \
@@ -242,7 +242,7 @@ def sample_713():
     # expan_max = pd.expanding_max(kl_pd['close'])
     expan_max = pd_expanding_max(kl_pd['close'])
     # fillna使用序列对应的expan_max
-    kl_pd['n1_high'].fillna(value=expan_max, inplace=True)
+    kl_pd['n1_high'] = kl_pd['n1_high'].fillna(value=expan_max)
     # 表7-5所示
     print('kl_pd[0:5]:\n', kl_pd[0:5])
 
@@ -255,7 +255,7 @@ def sample_713():
     # expan_min = pd.expanding_min(kl_pd['close'])
     expan_min = pd_expanding_min(kl_pd['close'])
     # fillna使用序列对应的eexpan_min
-    kl_pd['n2_low'].fillna(value=expan_min, inplace=True)
+    kl_pd['n2_low'] = kl_pd['n2_low'].fillna(value=expan_min)
 
     # 当天收盘价格超过N天内的最高价或最低价, 超过最高价格作为买入信号买入股票持有
     buy_index = kl_pd[kl_pd['close'] > kl_pd['n1_high'].shift(1)].index
@@ -274,7 +274,7 @@ def sample_713():
         才确定的，计算突破使用了收盘价格，所以使用shift(1)更接近真实情况
     """
     kl_pd['keep'] = kl_pd['signal'].shift(1)
-    kl_pd['keep'].fillna(method='ffill', inplace=True)
+    kl_pd['keep'] = kl_pd['keep'].ffill()
 
     # 计算基准收益
     kl_pd['benchmark_profit'] = np.log(

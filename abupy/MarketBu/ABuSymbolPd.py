@@ -79,25 +79,25 @@ def _benchmark(df, benchmark, symbol):
 
     # 来到这里说明没有放弃，那么就填充nan
     # 首先nan的交易量是0
-    kl_pd.volume.fillna(value=0, inplace=True)
+    kl_pd['volume'] = kl_pd['volume'].fillna(value=0)
     # nan的p_change是0
-    kl_pd.p_change.fillna(value=0, inplace=True)
+    kl_pd['p_change'] = kl_pd['p_change'].fillna(value=0)
     # 先把close填充了，然后用close填充其它的
-    kl_pd.close.fillna(method='pad', inplace=True)
-    kl_pd.close.fillna(method='bfill', inplace=True)
+    close_series = kl_pd['close'].ffill().bfill()
+    kl_pd['close'] = close_series
     # 用close填充open
-    kl_pd.open.fillna(value=kl_pd.close, inplace=True)
+    kl_pd['open'] = kl_pd['open'].fillna(value=close_series)
     # 用close填充high
-    kl_pd.high.fillna(value=kl_pd.close, inplace=True)
+    kl_pd['high'] = kl_pd['high'].fillna(value=close_series)
     # 用close填充low
-    kl_pd.low.fillna(value=kl_pd.close, inplace=True)
+    kl_pd['low'] = kl_pd['low'].fillna(value=close_series)
     # 用close填充pre_close
-    kl_pd.pre_close.fillna(value=kl_pd.close, inplace=True)
+    kl_pd['pre_close'] = kl_pd['pre_close'].fillna(value=close_series)
 
     # 细节nan处理完成后，把剩下的nan都填充了
-    kl_pd = kl_pd.fillna(method='pad')
+    kl_pd = kl_pd.ffill()
     # bfill再来一遍只是为了填充最前面的nan
-    kl_pd.fillna(method='bfill', inplace=True)
+    kl_pd = kl_pd.bfill()
 
     # pad了数据所以，交易日期date的值需要根据time index重新来一遍
     kl_pd['date'] = [int(ts.date().strftime("%Y%m%d")) for ts in kl_pd.index]

@@ -224,7 +224,7 @@ def sample_424_1():
     # 通过how控制 如果一行的数据中全部都是na就删除这行
     tsla_df.dropna(how='all')
     # 使用指定值填充na， inplace代表就地操作，即不返回新的序列在原始序列上修改
-    tsla_df.fillna(tsla_df.mean(), inplace=True)
+    tsla_df[:] = tsla_df.fillna(tsla_df.mean())
 
 
 def sample_424_2():
@@ -303,8 +303,8 @@ def sample_432():
                tsla_df[tsla_df.atr14 > 16]], axis=0)
 
     # 直接使用DataFrame对象append，结果与上面pd.concat的结果一致, 表4-20所示
-    print('tsla_df[tsla_df.p_change > 10].append(tsla_df[tsla_df.atr14 > 16]):\n',
-          tsla_df[tsla_df.p_change > 10].append(tsla_df[tsla_df.atr14 > 16]))
+    print('pd.concat([tsla_df[tsla_df.p_change > 10], tsla_df[tsla_df.atr14 > 16]]):\n',
+          pd.concat([tsla_df[tsla_df.p_change > 10], tsla_df[tsla_df.atr14 > 16]]))
 
 
 """
@@ -367,7 +367,7 @@ def judge_jump(p_today):
         p_today['jump'] = 1
         # 向上跳能量＝（今天最低 － 昨收）／ 跳空阀值
         p_today['jump_power'] = (p_today.low - p_today.pre_close) / jump_threshold
-        jump_pd = jump_pd.append(p_today)
+        jump_pd = pd.concat([jump_pd, p_today.to_frame().T])
     elif p_today.p_change < 0 and (p_today.pre_close - p_today.high) > jump_threshold:
         """
             符合向下跳空
@@ -376,7 +376,7 @@ def judge_jump(p_today):
         p_today['jump'] = -1
         # 向下跳能量＝（昨收 － 今天最高）／ 跳空阀值
         p_today['jump_power'] = (p_today.pre_close - p_today.high) / jump_threshold
-        jump_pd = jump_pd.append(p_today)
+        jump_pd = pd.concat([jump_pd, p_today.to_frame().T])
 
 
 def sample_45_1():
