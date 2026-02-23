@@ -1,4 +1,4 @@
-# -*- encoding:utf-8 -*-
+﻿# -*- encoding:utf-8 -*-
 """
     移动平均线，Moving Average，简称MA，原本的意思是移动平均，由于我们将其制作成线形，所以一般称之为移动平均线，简称均线。
     它是将某一段时间的收盘价之和除以该周期。 比如日线MA5指5天内的收盘价除以5 。
@@ -10,7 +10,7 @@ from __future__ import division
 from __future__ import absolute_import
 from __future__ import print_function
 
-from collections import Iterable
+from collections.abc import Iterable
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -178,3 +178,4 @@ def plot_ma(prices, kl_index, time_period, from_calc=EMACalcType.E_MA_MA,
     plt.grid(True)
     plt.legend(loc='best')
     plt.show()
+

@@ -1,4 +1,4 @@
-# -*- encoding:utf-8 -*-
+﻿# -*- encoding:utf-8 -*-
 """
     封装pandas中版本兼容问题，保持接口规范情况下，避免警告
 """
@@ -8,7 +8,7 @@ from __future__ import division
 from __future__ import print_function
 
 import functools
-from collections import Iterable
+from collections.abc import Iterable
 
 import pandas as pd
 from ..CoreBu.ABuFixes import partial
@@ -221,3 +221,4 @@ def pd_resample(pd_object, rule, *args, **kwargs):
     else:
         """pandas版本低，使用如pd_object.resample('21D').how方法调用, 也就不用kwargs.pop('how', '')了"""
         return pd_object.resample(rule, *args, **kwargs)
+

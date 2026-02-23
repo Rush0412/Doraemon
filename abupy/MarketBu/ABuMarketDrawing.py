@@ -1,4 +1,4 @@
-# -*- encoding:utf-8 -*-
+﻿# -*- encoding:utf-8 -*-
 """
     市场，数据可视化绘制模块
 """
@@ -9,7 +9,7 @@ from __future__ import absolute_import
 import itertools
 import logging
 import os
-from collections import Iterable
+from collections.abc import Iterable
 from math import pi
 
 import bokeh.plotting as bp
@@ -386,3 +386,4 @@ def plot_simple_two_stock(two_stcok_dict):
     plt.plot(y, label=label_arr[1])
     plt.legend(loc=2)
     plt.show()
+

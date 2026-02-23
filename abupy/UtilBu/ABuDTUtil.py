@@ -1,4 +1,4 @@
-# -*- encoding:utf-8 -*-
+﻿# -*- encoding:utf-8 -*-
 """
     通用装饰器, 上下文管理器工具模块
 """
@@ -12,7 +12,7 @@ import logging
 import pdb
 import time
 import warnings
-from collections import Iterable
+from collections.abc import Iterable
 from contextlib import contextmanager
 
 import numpy as np
@@ -249,3 +249,4 @@ def plt_show():
     plt.figure(figsize=ABuEnv.g_plt_figsize)
     yield
     plt.show()
+

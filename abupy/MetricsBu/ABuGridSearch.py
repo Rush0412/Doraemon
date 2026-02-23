@@ -1,11 +1,11 @@
-# -*- encoding:utf-8 -*-
+﻿# -*- encoding:utf-8 -*-
 """借鉴sklearn GridSearch，针对买入因子，卖出因子，选股因子最合进行最优寻找分析"""
 
 from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import division
 import operator
-from collections import Mapping
+from collections.abc import Mapping
 from functools import reduce
 from ..CoreBu.ABuFixes import partial
 from itertools import product, chain
@@ -437,3 +437,4 @@ class GridSearch(object):
         # 评分结果最好的赋予best_score_tuple_grid
         self.best_score_tuple_grid = score_tuple_array[scores.index[-1]]
         return scores, score_tuple_array
+

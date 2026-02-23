@@ -1,4 +1,4 @@
-# -*- encoding:utf-8 -*-
+﻿# -*- encoding:utf-8 -*-
 """
     技术线对象，对外执行，输出模块
 """
@@ -9,7 +9,7 @@ from __future__ import print_function
 import itertools
 import logging
 import math
-from collections import Iterable
+from collections.abc import Iterable
 from enum import Enum
 
 import numpy as np
@@ -652,3 +652,4 @@ class AbuTLine(FreezeAttrMixin):
                                                      self.high, self.mean)
 
     __repr__ = __str__
+

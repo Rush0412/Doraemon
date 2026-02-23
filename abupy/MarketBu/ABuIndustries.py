@@ -1,4 +1,4 @@
-# -*- encoding:utf-8 -*-
+﻿# -*- encoding:utf-8 -*-
 """
     行业分类模块，仅支持美股，a股，港股
 """
@@ -7,7 +7,7 @@ from __future__ import print_function
 from __future__ import absolute_import
 from __future__ import division
 
-from collections import Iterable
+from collections.abc import Iterable
 import logging
 from fnmatch import fnmatch
 
@@ -418,3 +418,4 @@ def get_industries_panel_from_target(target_symbol, show=False, n_folds=2):
     else:
         logging.info('Industries targetSymbols len = 0')
         return None, None
+

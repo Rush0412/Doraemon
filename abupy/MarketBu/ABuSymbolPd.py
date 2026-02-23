@@ -1,4 +1,4 @@
-# coding=utf-8
+﻿# coding=utf-8
 """
     数据对外接口模块，其它模块需要数据都只应该使用ABuSymbolPd, 不应涉及其它内部模块的使用
 """
@@ -8,7 +8,7 @@ from __future__ import division
 from __future__ import print_function
 
 import logging
-from collections import Iterable
+from collections.abc import Iterable
 
 import pandas as pd
 
@@ -421,3 +421,4 @@ def get_n_year(kl_pd, from_year, get_year=1, how='ff'):
     if hasattr(kl_pd, 'name'):
         ret_pd.name = kl_pd.name
     return ret_pd
+

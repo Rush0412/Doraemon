@@ -61,13 +61,13 @@ PostgreSQL（quant_jobs / stock_symbols / stock_klines）
 ```powershell
 cd backend
 python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 
 # 可选：覆盖数据库连接
 # $env:DATABASE_URL="postgresql://postgres:123456@localhost:5432/doraemon"
 
-uvicorn app.main:app --reload --port 8002
+python -m uvicorn app.main:app --reload --port 8002
 ```
 
 启动后可访问：

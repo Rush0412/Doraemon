@@ -1,4 +1,4 @@
-# -*- encoding:utf-8 -*-
+﻿# -*- encoding:utf-8 -*-
 """
     abupy中使用的金融时间序列分析模块, 模块真的方法真的参数都为abupy中格式化好的kl如下
 
@@ -15,7 +15,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-from collections import Iterable
+from collections.abc import Iterable
 
 import logging
 
@@ -378,3 +378,4 @@ def date_week_wave(df):
         return dww
 
     return _df_dispatch_concat(df, _date_week_wave)
+
