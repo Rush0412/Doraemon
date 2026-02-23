@@ -706,10 +706,12 @@ const gridTopRuns = computed(() => {
   }))
 })
 
-const analysisResult = computed(() => {
-  if (!store.activeJob || store.activeJob.type !== 'analysis') return null
-  return store.activeJob.result || null
+const analysisJob = computed(() => {
+  if (store.activeJob && store.activeJob.type === 'analysis') return store.activeJob
+  return latestJobByType('analysis')
 })
+
+const analysisResult = computed(() => analysisJob.value?.result || null)
 
 const gridSummaryText = computed(() =>
   gridSummary.value ? JSON.stringify(gridSummary.value, null, 2) : ''
@@ -1253,35 +1255,55 @@ const buildStockSelectPayload = () => {
 }
 
 const runVerify = async () => {
-  const job = await store.startVerify()
-  await store.fetchJob(job.id)
+  try {
+    const job = await store.startVerify()
+    await waitForJobDone(job.id, 2 * 60 * 1000)
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+    return null
+  }
 }
 
 const runKlUpdate = async () => {
-  const symbols = selectedSymbols.value.length ? selectedSymbols.value.join(',') : ''
-  const job = await store.startKlUpdate({
-    market: updateForm.market,
-    n_folds: updateForm.n_folds,
-    start: updateForm.start || undefined,
-    end: updateForm.end || undefined,
-    how: updateForm.how,
-    n_jobs: updateForm.n_jobs,
-    symbols: symbols || undefined,
-    all: !symbols
-  })
-  await store.fetchJob(job.id)
+  try {
+    const symbols = selectedSymbols.value.length ? selectedSymbols.value.join(',') : ''
+    const job = await store.startKlUpdate({
+      market: updateForm.market,
+      n_folds: updateForm.n_folds,
+      start: updateForm.start || undefined,
+      end: updateForm.end || undefined,
+      how: updateForm.how,
+      n_jobs: updateForm.n_jobs,
+      symbols: symbols || undefined,
+      all: !symbols
+    })
+    await waitForJobDone(job.id, 30 * 60 * 1000)
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+    return null
+  }
 }
 
 const runBacktest = async () => {
-  const job = await store.startBacktest(buildBacktestPayload())
-  await store.fetchJob(job.id)
-  return job
+  try {
+    klineError.value = ''
+    const job = await store.startBacktest(buildBacktestPayload())
+    return await waitForJobDone(job.id, 40 * 60 * 1000)
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+    return null
+  }
 }
 
 const runStockSelect = async () => {
-  const job = await store.startStockSelect(buildStockSelectPayload())
-  await store.fetchJob(job.id)
-  return job
+  try {
+    klineError.value = ''
+    const job = await store.startStockSelect(buildStockSelectPayload())
+    return await waitForJobDone(job.id, 30 * 60 * 1000)
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+    return null
+  }
 }
 
 const _normalizePayload = (value) => {
@@ -1391,58 +1413,64 @@ const runClosedLoop = async () => {
 }
 
 const runGridSearch = async () => {
-  const buyGrid = buildGridParamPayload(activeBuyStrategy.value, gridBuyParamLists)
-  const sellGrid = buildGridParamPayload(activeSellStrategy.value, gridSellParamLists)
-  const rankingWeights = {
-    profit: Number(gridForm.ranking_weights?.profit ?? 1),
-    win_rate: Number(gridForm.ranking_weights?.win_rate ?? 1),
-    sharpe: Number(gridForm.ranking_weights?.sharpe ?? 1),
-    annual_return: Number(gridForm.ranking_weights?.annual_return ?? 1),
-    drawdown: Number(gridForm.ranking_weights?.drawdown ?? 1)
+  try {
+    klineError.value = ''
+    const buyGrid = buildGridParamPayload(activeBuyStrategy.value, gridBuyParamLists)
+    const sellGrid = buildGridParamPayload(activeSellStrategy.value, gridSellParamLists)
+    const rankingWeights = {
+      profit: Number(gridForm.ranking_weights?.profit ?? 1),
+      win_rate: Number(gridForm.ranking_weights?.win_rate ?? 1),
+      sharpe: Number(gridForm.ranking_weights?.sharpe ?? 1),
+      annual_return: Number(gridForm.ranking_weights?.annual_return ?? 1),
+      drawdown: Number(gridForm.ranking_weights?.drawdown ?? 1)
+    }
+    const customBuyList = parseStringList(gridForm.buy_strategies)
+    const customSellList = parseStringList(gridForm.sell_strategies)
+    const buyStrategyList = gridExploreAllStrategies.value
+      ? buyStrategies.value.map((item) => item.id).filter(Boolean)
+      : customBuyList
+    const sellStrategyList = gridExploreAllStrategies.value
+      ? sellStrategies.value.map((item) => item.id).filter(Boolean)
+      : customSellList
+    const baseSymbols = gridUseBacktestBase.value ? backtestForm.symbols : gridForm.symbols
+    const baseMarketRaw = gridUseBacktestBase.value ? backtestForm.market : gridForm.market
+    const baseMarket = inferMarketBySymbols(baseSymbols, baseMarketRaw)
+    if (gridUseBacktestBase.value) backtestForm.market = baseMarket
+    else gridForm.market = baseMarket
+    const baseCash = gridUseBacktestBase.value ? backtestForm.cash : gridForm.cash
+    const baseStart = gridUseBacktestBase.value ? backtestForm.start : gridForm.start
+    const baseEnd = gridUseBacktestBase.value ? backtestForm.end : gridForm.end
+    const baseNFolds = gridUseBacktestBase.value ? backtestForm.n_folds : gridForm.n_folds
+    const normalizedMaxRuns = Math.max(1, Number(gridForm.max_runs || 150))
+    gridForm.max_runs = normalizedMaxRuns
+    const job = await store.startGridSearch({
+      market: baseMarket,
+      symbols: baseSymbols,
+      n_folds: baseNFolds,
+      start: baseStart || undefined,
+      end: baseEnd || undefined,
+      cash: baseCash,
+      buy_strategy: buyStrategyId.value,
+      sell_strategy: sellStrategyId.value,
+      buy_strategies: buyStrategyList.length ? buyStrategyList : undefined,
+      sell_strategies: sellStrategyList.length ? sellStrategyList : undefined,
+      buy_params_grid: buyGrid,
+      sell_params_grid: sellGrid,
+      validation_mode: gridForm.validation_mode,
+      train_ratio: gridForm.train_ratio,
+      walk_forward_days: gridForm.walk_forward_days,
+      walk_forward_step_days: gridForm.walk_forward_step_days,
+      ranking_metric: gridForm.ranking_metric,
+      ranking_weights: rankingWeights,
+      symbol_top_n: gridForm.symbol_top_n,
+      symbol_eval_limit: gridForm.symbol_eval_limit,
+      max_runs: normalizedMaxRuns
+    })
+    await waitForJobDone(job.id, 60 * 60 * 1000)
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+    return null
   }
-  const customBuyList = parseStringList(gridForm.buy_strategies)
-  const customSellList = parseStringList(gridForm.sell_strategies)
-  const buyStrategyList = gridExploreAllStrategies.value
-    ? buyStrategies.value.map((item) => item.id).filter(Boolean)
-    : customBuyList
-  const sellStrategyList = gridExploreAllStrategies.value
-    ? sellStrategies.value.map((item) => item.id).filter(Boolean)
-    : customSellList
-  const baseSymbols = gridUseBacktestBase.value ? backtestForm.symbols : gridForm.symbols
-  const baseMarketRaw = gridUseBacktestBase.value ? backtestForm.market : gridForm.market
-  const baseMarket = inferMarketBySymbols(baseSymbols, baseMarketRaw)
-  if (gridUseBacktestBase.value) backtestForm.market = baseMarket
-  else gridForm.market = baseMarket
-  const baseCash = gridUseBacktestBase.value ? backtestForm.cash : gridForm.cash
-  const baseStart = gridUseBacktestBase.value ? backtestForm.start : gridForm.start
-  const baseEnd = gridUseBacktestBase.value ? backtestForm.end : gridForm.end
-  const baseNFolds = gridUseBacktestBase.value ? backtestForm.n_folds : gridForm.n_folds
-  const normalizedMaxRuns = Math.max(1, Number(gridForm.max_runs || 150))
-  gridForm.max_runs = normalizedMaxRuns
-  const job = await store.startGridSearch({
-    market: baseMarket,
-    symbols: baseSymbols,
-    n_folds: baseNFolds,
-    start: baseStart || undefined,
-    end: baseEnd || undefined,
-    cash: baseCash,
-    buy_strategy: buyStrategyId.value,
-    sell_strategy: sellStrategyId.value,
-    buy_strategies: buyStrategyList.length ? buyStrategyList : undefined,
-    sell_strategies: sellStrategyList.length ? sellStrategyList : undefined,
-    buy_params_grid: buyGrid,
-    sell_params_grid: sellGrid,
-    validation_mode: gridForm.validation_mode,
-    train_ratio: gridForm.train_ratio,
-    walk_forward_days: gridForm.walk_forward_days,
-    walk_forward_step_days: gridForm.walk_forward_step_days,
-    ranking_metric: gridForm.ranking_metric,
-    ranking_weights: rankingWeights,
-    symbol_top_n: gridForm.symbol_top_n,
-    symbol_eval_limit: gridForm.symbol_eval_limit,
-    max_runs: normalizedMaxRuns
-  })
-  await store.fetchJob(job.id)
 }
 
 const buildToolOptions = () => {
@@ -1478,19 +1506,24 @@ const buildToolOptions = () => {
 }
 
 const runTool = async () => {
-  const effectiveMarket = inferMarketBySymbols(toolForm.symbols, toolForm.market)
-  toolForm.market = effectiveMarket
-  const job = await store.startQuantTool({
-    market: effectiveMarket,
-    tool: toolForm.tool,
-    symbols: toolForm.symbols,
-    n_folds: toolForm.n_folds,
-    start: toolForm.start || undefined,
-    end: toolForm.end || undefined,
-    limit: toolForm.limit,
-    options: buildToolOptions()
-  })
-  await store.fetchJob(job.id)
+  try {
+    const effectiveMarket = inferMarketBySymbols(toolForm.symbols, toolForm.market)
+    toolForm.market = effectiveMarket
+    const job = await store.startQuantTool({
+      market: effectiveMarket,
+      tool: toolForm.tool,
+      symbols: toolForm.symbols,
+      n_folds: toolForm.n_folds,
+      start: toolForm.start || undefined,
+      end: toolForm.end || undefined,
+      limit: toolForm.limit,
+      options: buildToolOptions()
+    })
+    await waitForJobDone(job.id, 20 * 60 * 1000)
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+    return null
+  }
 }
 
 onMounted(async () => {
