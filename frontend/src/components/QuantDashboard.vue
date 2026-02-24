@@ -97,7 +97,6 @@
       :run-kl-update="runKlUpdate"
     />
 
-
     
     <StrategyPanel
       :active="activeTab === 'strategy'"
@@ -176,7 +175,6 @@
       :set-equity-container="setEquityContainer"
     />
 
-
     
     <AnalysisPanel
       :active="activeTab === 'tools'"
@@ -192,6 +190,28 @@
       :actions-busy="actionsBusy"
     />
 
+    <MlPanel
+      :active="activeTab === 'ml'"
+      :actions-busy="actionsBusy"
+      :ml-running="mlRunning"
+      :ml-loading="store.mlLoading"
+      :ml-error="store.mlError"
+      :ml-feature-form="mlFeatureForm"
+      :ml-train-form="mlTrainForm"
+      :ml-predict-form="mlPredictForm"
+      :ml-feature-result="mlFeatureResult"
+      :ml-train-result="mlTrainResult"
+      :ml-predict-result="mlPredictResult"
+      :ml-models="store.mlModels"
+      :ml-predictions="store.mlPredictions"
+      :run-ml-feature-build="runMlFeatureBuild"
+      :run-ml-train="runMlTrain"
+      :run-ml-predict="runMlPredict"
+      :run-ml-pipeline="runMlPipeline"
+      :refresh-ml-data="refreshMlData"
+      :promote-ml-model="promoteMlModel"
+      :apply-prediction-to-backtest="applyPredictionToBacktest"
+    />
 
     <JobsPanel
       :active="activeTab === 'jobs'"
@@ -241,6 +261,12 @@ import {
   resetGridParamLists,
   resetStrategyParams
 } from './quant/utils/strategyGrid'
+import {
+  brief,
+  defaultSymbolForMarket,
+  formatNumber,
+  formatTime
+} from './quant/utils/dashboardFormatters'
 import { useQuantStore } from '../stores/quantStore'
 
 const store = useQuantStore()
@@ -267,8 +293,15 @@ const tabs = [
     hint: '运行支撑阻力、跳空、趋势速度等工具，生成交易信号。'
   },
   {
-    id: 'jobs',
+    id: 'ml',
     step: '04',
+    title: 'ML 模型',
+    subtitle: '特征训练与预测',
+    hint: '构建特征、训练模型、生成预测并输出操作建议。'
+  },
+  {
+    id: 'jobs',
+    step: '05',
     title: '任务中心',
     subtitle: '状态与导出',
     hint: '查看任务状态、结果明细并导出。'
@@ -426,15 +459,6 @@ const activeBuyStrategy = computed(() =>
 const activeSellStrategy = computed(() =>
   sellStrategies.value.find((item) => item.id === sellStrategyId.value) || null
 )
-
-const defaultSymbolForMarket = (value) => {
-  if (value === 'SH') return '600036'
-  if (value === 'SZ') return '000001'
-  if (value === '300') return '300750'
-  if (value === 'US') return 'AAPL'
-  if (value === 'HK') return '00700'
-  return '600036'
-}
 
 if (!backtestForm.symbols) backtestForm.symbols = defaultSymbolForMarket(market.value)
 if (!gridForm.symbols) gridForm.symbols = defaultSymbolForMarket(market.value)
@@ -996,30 +1020,6 @@ const toolOptionMode = computed(() => {
 
 const totalPages = computed(() => Math.max(1, Math.ceil(store.total / store.pageSize)))
 
-const formatTime = (v) => {
-  if (!v) return '-'
-  try {
-    const d = typeof v === 'string' ? new Date(v) : new Date(String(v))
-    if (Number.isNaN(d.getTime())) return String(v)
-    return d.toLocaleString()
-  } catch {
-    return String(v)
-  }
-}
-
-const brief = (v) => {
-  if (!v) return ''
-  const s = typeof v === 'string' ? v : JSON.stringify(v)
-  return s.length > 60 ? `${s.slice(0, 57)}...` : s
-}
-
-const formatNumber = (value, digits = 2) => {
-  if (value === null || value === undefined) return '-'
-  const num = Number(value)
-  if (!Number.isFinite(num)) return '-'
-  return num.toFixed(digits)
-}
-
 const search = async () => {
   await store.searchSymbols({
     market: market.value,
@@ -1167,6 +1167,7 @@ const syncSelectedSymbols = () => {
   backtestForm.symbols = text
   gridForm.symbols = text
   toolForm.symbols = text
+  syncMlSymbols(text)
   updateForm.symbols = text
 }
 
@@ -1209,6 +1210,31 @@ const waitForJobDone = async (jobId, timeoutMs = 20 * 60 * 1000, pollMs = 1200) 
   }
   throw new Error(`任务 ${jobId} 超时未完成`)
 }
+
+const {
+  mlRunning,
+  mlFeatureForm,
+  mlTrainForm,
+  mlPredictForm,
+  mlFeatureResult,
+  mlTrainResult,
+  mlPredictResult,
+  refreshMlData,
+  runMlFeatureBuild,
+  runMlTrain,
+  runMlPredict,
+  runMlPipeline,
+  promoteMlModel,
+  applyPredictionToBacktest,
+  syncSymbols: syncMlSymbols
+} = useMlWorkflow({
+  store,
+  market,
+  waitForJobDone,
+  inferMarketBySymbols,
+  normalizeSymbolsInputForUi,
+  onUsePrediction: applySymbolToBacktest
+})
 
 const buildBacktestPayload = () => {
   const effectiveMarket = inferMarketBySymbols(backtestForm.symbols, backtestForm.market)
@@ -1448,6 +1474,7 @@ onMounted(async () => {
   await Promise.all([
     store.fetchJobs(),
     store.fetchStrategies(),
+    refreshMlData(),
     store.searchSymbols({
       market: market.value,
       q: query.value,
@@ -1457,6 +1484,7 @@ onMounted(async () => {
     })
   ])
   await restoreQuantSettings()
+  syncMlSymbols(normalizeSymbolsInputForUi(backtestForm.symbols || ''))
   settingsReady.value = true
   scheduleSaveQuantSettings()
 })

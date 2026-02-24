@@ -1,4 +1,4 @@
-import { computed } from 'vue'
+﻿import { computed, reactive, ref } from 'vue'
 
 const toNumber = (value, fallback = null) => {
   const num = Number(value)
@@ -24,13 +24,113 @@ const splitRatios = (values, fallback = [0.45, 0.35, 0.2]) => {
   return nums.map((item) => item / sum)
 }
 
+const DEFAULT_ADVICE_TEMPLATES = {
+  stable: {
+    label: '稳健',
+    position: {
+      buyHigh: 0.46,
+      buyMid: 0.36,
+      buyWatchHigh: 0.28,
+      buyWatchMid: 0.2,
+      reduce: 0.12,
+      watch: 0.08
+    },
+    entry: {
+      first: 0.5,
+      pullback: 0.3,
+      breakout: 0.2
+    },
+    takeProfit: {
+      tp1: 0.45,
+      tp2: 0.35,
+      tp3: 0.2
+    },
+    trailStopPct: 0.045
+  },
+  balanced: {
+    label: '平衡',
+    position: {
+      buyHigh: 0.62,
+      buyMid: 0.5,
+      buyWatchHigh: 0.38,
+      buyWatchMid: 0.28,
+      reduce: 0.16,
+      watch: 0.1
+    },
+    entry: {
+      first: 0.45,
+      pullback: 0.35,
+      breakout: 0.2
+    },
+    takeProfit: {
+      tp1: 0.4,
+      tp2: 0.35,
+      tp3: 0.25
+    },
+    trailStopPct: 0.055
+  },
+  aggressive: {
+    label: '激进',
+    position: {
+      buyHigh: 0.72,
+      buyMid: 0.58,
+      buyWatchHigh: 0.46,
+      buyWatchMid: 0.34,
+      reduce: 0.2,
+      watch: 0.12
+    },
+    entry: {
+      first: 0.4,
+      pullback: 0.35,
+      breakout: 0.25
+    },
+    takeProfit: {
+      tp1: 0.35,
+      tp2: 0.35,
+      tp3: 0.3
+    },
+    trailStopPct: 0.065
+  }
+}
+
+const normalizeTemplate = (template, fallback) => ({
+  label: String(template?.label || fallback.label),
+  position: {
+    buyHigh: clamp(template?.position?.buyHigh, 0, 0.85),
+    buyMid: clamp(template?.position?.buyMid, 0, 0.85),
+    buyWatchHigh: clamp(template?.position?.buyWatchHigh, 0, 0.7),
+    buyWatchMid: clamp(template?.position?.buyWatchMid, 0, 0.65),
+    reduce: clamp(template?.position?.reduce, 0, 0.5),
+    watch: clamp(template?.position?.watch, 0, 0.4)
+  },
+  entry: {
+    first: clamp(template?.entry?.first, 0, 1),
+    pullback: clamp(template?.entry?.pullback, 0, 1),
+    breakout: clamp(template?.entry?.breakout, 0, 1)
+  },
+  takeProfit: {
+    tp1: clamp(template?.takeProfit?.tp1, 0, 1),
+    tp2: clamp(template?.takeProfit?.tp2, 0, 1),
+    tp3: clamp(template?.takeProfit?.tp3, 0, 1)
+  },
+  trailStopPct: clamp(template?.trailStopPct, 0.01, 0.2)
+})
+
+const buildTemplateMap = (source) => {
+  const map = {}
+  Object.entries(DEFAULT_ADVICE_TEMPLATES).forEach(([key, fallback]) => {
+    map[key] = normalizeTemplate(source?.[key] || fallback, fallback)
+  })
+  return map
+}
+
 const signalAssessment = (signal) => {
   const action = signal?.action
   if (action === 'breakout') {
     return { score: 2, direction: 'buy', reason: signal?.reason || '价格突破阻力位，趋势转强。' }
   }
   if (action === 'near_support') {
-    return { score: 1, direction: 'buy_watch', reason: signal?.reason || '价格接近支撑位，可小仓试探。' }
+    return { score: 1, direction: 'buy_watch', reason: signal?.reason || '价格接近支撑位，可小仓位试探。' }
   }
   if (action === 'near_resistance') {
     return { score: -1, direction: 'reduce', reason: signal?.reason || '价格接近阻力位，优先减仓。' }
@@ -42,7 +142,7 @@ const signalAssessment = (signal) => {
 }
 
 const backtestAssessment = (stats) => {
-  if (!stats) return { score: -0.2, notes: ['缺少回测统计，建议先执行回测再决策。'] }
+  if (!stats) return { score: -0.2, notes: ['缺少回测统计，建议先运行回测再决策。'] }
   const notes = []
   let score = 0
   const winRate = toNumber(stats.winRate, 0)
@@ -58,7 +158,7 @@ const backtestAssessment = (stats) => {
 
   if (totalTrades < 15) {
     score -= 0.3
-    notes.push('成交样本偏少，统计稳定性不足。')
+    notes.push('交易样本偏少，统计稳定性不足。')
   }
 
   notes.push(`回测胜率 ${formatNumber(winRate, 1)}%，累计盈亏 ${formatNumber(totalProfit, 2)}。`)
@@ -106,30 +206,25 @@ const gridAssessment = (summary, diagnostics, topRuns) => {
 
 const buildEvolutionSteps = ({ stats, gridSummary, gridTopRuns }) => {
   const steps = []
-
   if (Array.isArray(gridTopRuns) && gridTopRuns.length) {
     const best = gridTopRuns[0]
     steps.push(`围绕最优策略 ${best.buy_strategy || '-'} / ${best.sell_strategy || '-'} 做 ±20% 参数扩展寻优。`)
   } else {
     steps.push('先做参数交叉验证，拿到前 10 组合后再做二轮收敛。')
   }
-
   const trades = toNumber(stats?.total, 0)
   if (trades < 20) {
     steps.push('扩大回测区间到 2-3 年，或增加候选标的，提升样本有效性。')
   }
-
   const winRate = toNumber(stats?.winRate, 0)
   if (winRate > 0 && winRate < 52) {
     steps.push('下调仓位上限并收紧止损倍数，优先修复回撤后再追求收益。')
   } else if (winRate >= 60) {
     steps.push('保持止损不变，优先优化止盈分批比例，提高盈亏比。')
   }
-
   if (!gridSummary) {
     steps.push('当前缺少寻优结论，建议先运行“参数交叉验证”再执行一键闭环。')
   }
-
   return steps
 }
 
@@ -140,14 +235,19 @@ export const useOperationSuggestion = ({
   gridDiagnostics,
   gridTopRuns
 }) => {
+  const adviceProfile = ref('balanced')
+  const adviceTemplates = reactive(buildTemplateMap())
+
   const operationSuggestion = computed(() => {
     const signal = analysisResult.value?.signal || null
     const stats = backtestTradeStats.value || null
+    const templates = adviceTemplates
+    const profileKey = templates[adviceProfile.value] ? adviceProfile.value : 'balanced'
+    const profile = templates[profileKey] || DEFAULT_ADVICE_TEMPLATES.balanced
 
     const signalPart = signalAssessment(signal)
     const backtestPart = backtestAssessment(stats)
     const gridPart = gridAssessment(gridSummary.value, gridDiagnostics?.value, gridTopRuns.value)
-
     const totalScore = signalPart.score * 0.55 + backtestPart.score * 0.3 + gridPart.score * 0.15
 
     let confidence = '中'
@@ -167,15 +267,20 @@ export const useOperationSuggestion = ({
     else if (direction === 'buy' || direction === 'buy_watch') modeLabel = '试探进场'
     else if (direction === 'reduce' || direction === 'sell') modeLabel = '防守风控'
 
-    let positionPct = 0.12
-    if (direction === 'buy') positionPct = confidence === '高' ? 0.68 : 0.52
-    else if (direction === 'buy_watch') positionPct = confidence === '高' ? 0.38 : 0.26
-    else if (direction === 'reduce') positionPct = 0.15
-    else if (direction === 'sell') positionPct = 0
+    let positionPct = profile.position.watch
+    if (direction === 'buy') {
+      positionPct = confidence === '高' ? profile.position.buyHigh : profile.position.buyMid
+    } else if (direction === 'buy_watch') {
+      positionPct = confidence === '高' ? profile.position.buyWatchHigh : profile.position.buyWatchMid
+    } else if (direction === 'reduce') {
+      positionPct = profile.position.reduce
+    } else if (direction === 'sell') {
+      positionPct = 0
+    }
 
     const winRate = toNumber(stats?.winRate, 0)
-    if (winRate >= 65) positionPct = Math.min(0.8, positionPct + 0.06)
-    if (winRate > 0 && winRate < 45) positionPct = Math.max(0, positionPct - 0.1)
+    if (winRate >= 65) positionPct = Math.min(0.85, positionPct + 0.05)
+    if (winRate > 0 && winRate < 45) positionPct = Math.max(0, positionPct - 0.08)
 
     const lastClose = toNumber(signal?.last_close, null)
     const support = toNumber(signal?.support, null)
@@ -183,21 +288,29 @@ export const useOperationSuggestion = ({
 
     let stopLoss = toNumber(signal?.stop_loss, null)
     let takeProfit = toNumber(signal?.take_profit, null)
-
     if (lastClose !== null) {
       if (stopLoss === null) {
-        stopLoss = direction === 'sell' ? Number((lastClose * 1.02).toFixed(2)) : Number((lastClose * 0.95).toFixed(2))
+        const baseLoss = direction === 'sell' ? 1.02 : 0.95
+        stopLoss = Number((lastClose * baseLoss).toFixed(2))
       }
       const risk = Math.max(0.01, Math.abs(lastClose - stopLoss))
       if (takeProfit === null) {
-        const rr = confidence === '高' ? 2.8 : 2.2
+        const rr = confidence === '高' ? 2.8 : confidence === '中' ? 2.2 : 1.8
         takeProfit = Number((lastClose + risk * rr).toFixed(2))
       }
     }
 
+    const [entry1, entry2, entry3] = splitRatios([
+      profile.entry.first,
+      profile.entry.pullback,
+      profile.entry.breakout
+    ])
+    const [tp1Ratio, tp2Ratio, tp3Ratio] = splitRatios([
+      profile.takeProfit.tp1,
+      profile.takeProfit.tp2,
+      profile.takeProfit.tp3
+    ])
     const tpDelta = lastClose !== null && takeProfit !== null ? Math.max(0, takeProfit - lastClose) : null
-    const [entry1, entry2, entry3] = splitRatios(confidence === '高' ? [0.4, 0.35, 0.25] : [0.5, 0.3, 0.2])
-    const [tp1Ratio, tp2Ratio, tp3Ratio] = splitRatios(confidence === '高' ? [0.35, 0.35, 0.3] : [0.4, 0.35, 0.25])
 
     const tranchePlan =
       direction === 'buy' || direction === 'buy_watch'
@@ -215,7 +328,11 @@ export const useOperationSuggestion = ({
             }
           ]
         : [
-            { label: '风险处理', ratio: 1, trigger: direction === 'sell' ? '优先清仓，停止新增仓位。' : '先降仓位，等待信号恢复。' }
+            {
+              label: '风险处理',
+              ratio: 1,
+              trigger: direction === 'sell' ? '优先清仓，停止新增仓位。' : '先降仓位，等待信号恢复。'
+            }
           ]
 
     const takeProfitPlan =
@@ -269,20 +386,24 @@ export const useOperationSuggestion = ({
       takeProfitPlan,
       riskRule: {
         hardStop: stopLoss,
-        trailStopPct: direction === 'buy' && confidence === '高' ? 0.06 : 0.05
+        trailStopPct: clamp(profile.trailStopPct, 0.01, 0.2)
       },
       evolutionSteps: buildEvolutionSteps({ stats, gridSummary: gridSummary.value, gridTopRuns: gridTopRuns.value }),
       workflowSteps: [
-        '1. 独立选股：筛出前 10 只候选。',
-        '2. 回测验证：验证候选在当前策略下的胜率与回撤。',
+        '1. 独立选股：筛出前 10 候选。',
+        '2. 回测验证：评估候选在当前策略下的胜率与回撤。',
         '3. 量化分析：提取支撑/阻力与止损止盈位。',
         '4. 执行建议：按分批建仓与分批止盈规则执行。',
         '5. 结果复盘：将最新结果用于下一轮参数寻优。'
-      ]
+      ],
+      profileKey,
+      profileLabel: profile.label
     }
   })
 
   return {
+    adviceProfile,
+    adviceTemplates,
     operationSuggestion
   }
 }
