@@ -4,7 +4,7 @@
       <div class="hero-head">
         <div>
           <p class="eyebrow">閲忓寲浠诲姟涓績</p>
-          <h1>閲忓寲浜ゆ槗鎸囨尌鍙?/h1>
+          <h1>量化交易指挥台</h1>
           <p class="hero-sub">
             鏁版嵁鏇存柊銆佺瓥鐣ュ洖娴嬨€佸弬鏁板浼樸€侀噺鍖栧垎鏋愪笌褰撴棩寤鸿鐨勪竴浣撳寲闂幆銆?          </p>
         </div>
@@ -19,7 +19,7 @@
           <p class="metric-value">{{ jobStats.total }}</p>
         </div>
         <div class="metric-card">
-          <p class="metric-label">杩愯涓?/p>
+          <p class="metric-label">运行中</p>
           <p class="metric-value">{{ jobStats.running }}</p>
         </div>
         <div class="metric-card">
@@ -53,8 +53,8 @@
           <p class="muted">{{ activeTabMeta.hint }}</p>
         </div>
         <div class="flow-actions">
-          <button class="btn-secondary" @click="goPrev" :disabled="isFirstTab">涓婁竴姝?/button>
-          <button class="btn-primary" @click="goNext" :disabled="isLastTab">涓嬩竴姝?/button>
+          <button class="btn-secondary" @click="goPrev" :disabled="isFirstTab">上一步</button>
+          <button class="btn-primary" @click="goNext" :disabled="isLastTab">下一步</button>
         </div>
       </div>
     </section>
@@ -498,12 +498,17 @@ const defaultSymbolForMarket = (value) => {
 if (!backtestForm.symbols) backtestForm.symbols = defaultSymbolForMarket(market.value)
 if (!gridForm.symbols) gridForm.symbols = defaultSymbolForMarket(market.value)
 if (!toolForm.symbols) toolForm.symbols = defaultSymbolForMarket(market.value)
+if (!mlFeatureForm.symbols) mlFeatureForm.symbols = defaultSymbolForMarket(market.value)
+if (!mlPredictForm.symbols) mlPredictForm.symbols = defaultSymbolForMarket(market.value)
 
 watch(market, (val) => {
   updateForm.market = val
   backtestForm.market = val
   gridForm.market = val
   toolForm.market = val
+  mlFeatureForm.market = val
+  mlTrainForm.market = val
+  mlPredictForm.market = val
   if (!backtestForm.symbols) backtestForm.symbols = defaultSymbolForMarket(val)
   if (!gridForm.symbols) gridForm.symbols = defaultSymbolForMarket(val)
   if (!toolForm.symbols) toolForm.symbols = defaultSymbolForMarket(val)
@@ -775,6 +780,25 @@ const analysisJob = computed(() => {
 })
 
 const analysisResult = computed(() => analysisJob.value?.result || null)
+
+const mlFeatureJob = computed(() => {
+  if (store.activeJob && store.activeJob.type === 'ml_feature') return store.activeJob
+  return latestJobByType('ml_feature')
+})
+
+const mlTrainJob = computed(() => {
+  if (store.activeJob && store.activeJob.type === 'ml_train') return store.activeJob
+  return latestJobByType('ml_train')
+})
+
+const mlPredictJob = computed(() => {
+  if (store.activeJob && store.activeJob.type === 'ml_predict') return store.activeJob
+  return latestJobByType('ml_predict')
+})
+
+const mlFeatureResult = computed(() => mlFeatureJob.value?.result || null)
+const mlTrainResult = computed(() => mlTrainJob.value?.result || null)
+const mlPredictResult = computed(() => mlPredictJob.value?.result || null)
 
 const gridSummaryText = computed(() =>
   gridSummary.value ? JSON.stringify(gridSummary.value, null, 2) : ''
@@ -1225,6 +1249,8 @@ const syncSelectedSymbols = () => {
   backtestForm.symbols = text
   gridForm.symbols = text
   toolForm.symbols = text
+  mlFeatureForm.symbols = text
+  mlPredictForm.symbols = text
   updateForm.symbols = text
 }
 
@@ -1273,7 +1299,7 @@ const waitForJobDone = async (jobId, timeoutMs = 20 * 60 * 1000, pollMs = 1200) 
     await sleep(delayMs)
     delayMs = Math.min(Math.round(delayMs * 1.35), 5000)
   }
-  throw new Error(`浠诲姟 ${jobId} 瓒呮椂鏈畬鎴恅)
+  throw new Error(`任务 ${jobId} 超时未完成`)
 }
 
 const buildBacktestPayload = () => {
@@ -1434,7 +1460,7 @@ const runClosedLoop = async () => {
       ? selectResult.top_symbols.map((item) => String(item.symbol || '').trim()).filter(Boolean)
       : []
     if (!topSymbols.length) {
-      throw new Error('鐙珛閫夎偂鏈繑鍥炲彲鍥炴祴鏍囩殑锛岃璋冩暣鑼冨洿鍚庨噸璇曘€?)
+      throw new Error('独立选股未返回可回测标的，请调整范围后重试。')
     }
 
     const picked = topSymbols.slice(0, Math.max(1, Number(gridForm.symbol_top_n || 10)))
@@ -1597,12 +1623,152 @@ const runTool = async () => {
   }
 }
 
+const buildMlFeaturePayload = () => {
+  const effectiveMarket = inferMarketBySymbols(mlFeatureForm.symbols, mlFeatureForm.market)
+  mlFeatureForm.market = effectiveMarket
+  return {
+    market: effectiveMarket,
+    symbols: mlFeatureForm.symbols || undefined,
+    feature_version: mlFeatureForm.feature_version || 'v1',
+    min_rows: Number(mlFeatureForm.min_rows || 120),
+    symbol_limit: Number(mlFeatureForm.symbol_limit || 300),
+    start: mlFeatureForm.start || undefined,
+    end: mlFeatureForm.end || undefined
+  }
+}
+
+const buildMlTrainPayload = () => {
+  return {
+    market: mlTrainForm.market,
+    feature_version: mlTrainForm.feature_version || 'v1',
+    target: mlTrainForm.target || 'y_up_5d',
+    train_ratio: Number(mlTrainForm.train_ratio || 0.8),
+    max_samples: Number(mlTrainForm.max_samples || 300000),
+    model_name: mlTrainForm.model_name || undefined,
+    max_iter: Number(mlTrainForm.max_iter || 300),
+    learning_rate: Number(mlTrainForm.learning_rate || 0.05),
+    max_depth: Number(mlTrainForm.max_depth || 6),
+    min_samples_leaf: Number(mlTrainForm.min_samples_leaf || 30),
+    l2_regularization: Number(mlTrainForm.l2_regularization || 0)
+  }
+}
+
+const buildMlPredictPayload = () => {
+  const effectiveMarket = inferMarketBySymbols(mlPredictForm.symbols, mlPredictForm.market)
+  mlPredictForm.market = effectiveMarket
+  const modelId = Number(mlPredictForm.model_id)
+  return {
+    market: effectiveMarket,
+    target: mlPredictForm.target || 'y_up_5d',
+    model_id: Number.isFinite(modelId) && modelId > 0 ? modelId : undefined,
+    symbols: mlPredictForm.symbols || undefined,
+    limit: Number(mlPredictForm.limit || 20)
+  }
+}
+
+const refreshMlData = async () => {
+  await Promise.all([
+    store.fetchMlModels({
+      market: mlTrainForm.market,
+      target: mlTrainForm.target,
+      limit: 100
+    }),
+    store.fetchMlPredictions({
+      market: mlPredictForm.market,
+      modelId: mlPredictForm.model_id,
+      limit: Math.max(20, Number(mlPredictForm.limit || 20))
+    })
+  ])
+}
+
+const runMlFeatureBuild = async () => {
+  try {
+    mlRunning.value = true
+    const job = await store.startMlFeatureBuild(buildMlFeaturePayload())
+    await waitForJobDone(job.id, 40 * 60 * 1000)
+    await refreshMlData()
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+    return null
+  } finally {
+    mlRunning.value = false
+  }
+}
+
+const runMlTrain = async () => {
+  try {
+    mlRunning.value = true
+    const job = await store.startMlTrain(buildMlTrainPayload())
+    await waitForJobDone(job.id, 60 * 60 * 1000)
+    await refreshMlData()
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+    return null
+  } finally {
+    mlRunning.value = false
+  }
+}
+
+const runMlPredict = async () => {
+  try {
+    mlRunning.value = true
+    const job = await store.startMlPredict(buildMlPredictPayload())
+    await waitForJobDone(job.id, 20 * 60 * 1000)
+    await refreshMlData()
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+    return null
+  } finally {
+    mlRunning.value = false
+  }
+}
+
+const runMlPipeline = async () => {
+  if (mlRunning.value) return
+  mlRunning.value = true
+  try {
+    const featureJob = await store.startMlFeatureBuild(buildMlFeaturePayload())
+    await waitForJobDone(featureJob.id, 40 * 60 * 1000)
+    const trainJob = await store.startMlTrain(buildMlTrainPayload())
+    await waitForJobDone(trainJob.id, 60 * 60 * 1000)
+    const predictJob = await store.startMlPredict(buildMlPredictPayload())
+    await waitForJobDone(predictJob.id, 20 * 60 * 1000)
+    await refreshMlData()
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+  } finally {
+    mlRunning.value = false
+  }
+}
+
+const promoteMlModel = async (modelId) => {
+  if (!modelId) return
+  try {
+    await store.promoteMlModel(modelId)
+    mlPredictForm.model_id = Number(modelId)
+    await refreshMlData()
+  } catch (err) {
+    klineError.value = err?.message || String(err)
+  }
+}
+
+const applyPredictionToBacktest = (symbol) => {
+  if (!symbol) return
+  const text = String(symbol).trim()
+  if (!text) return
+  backtestForm.symbols = normalizeSymbolsInputForUi(text)
+  backtestForm.market = inferMarketBySymbol(text, market.value || 'SH')
+  chartSymbol.value = text
+  activeTab.value = 'strategy'
+}
+
 onMounted(async () => {
   savedPortfolios.value = JSON.parse(localStorage.getItem('doraemon_portfolios') || '[]')
   window.addEventListener('resize', handleResize)
   await Promise.all([
     store.fetchJobs(),
     store.fetchStrategies(),
+    refreshMlData(),
     store.searchSymbols({
       market: market.value,
       q: query.value,
