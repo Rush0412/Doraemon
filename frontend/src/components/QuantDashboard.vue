@@ -214,8 +214,10 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import PreparePanel from './quant/PreparePanel.vue'
 import StrategyPanel from './quant/StrategyPanel.vue'
 import AnalysisPanel from './quant/AnalysisPanel.vue'
+import MlPanel from './quant/MlPanel.vue'
 import JobsPanel from './quant/JobsPanel.vue'
 import { useBacktestCharts } from './quant/composables/useBacktestCharts'
+import { useMlWorkflow } from './quant/composables/useMlWorkflow'
 import { useOperationSuggestion } from './quant/composables/useOperationSuggestion'
 import { useQuantSettings } from './quant/composables/useQuantSettings'
 import {
