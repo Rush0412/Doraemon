@@ -291,6 +291,43 @@ def _fetch_akshare_df(symbol: str, start: Optional[str], end: Optional[str], n_f
     return df.rename(columns=rename_map)
 
 
+def _load_symbol_kl_df(symbol: str, start: Optional[str], end: Optional[str], n_folds: int):
+    from abupy.MarketBu import ABuSymbolPd
+
+    try:
+        folds = max(1, int(n_folds or 1))
+    except Exception:
+        folds = 1
+    attempts = [(start, end, folds)]
+    if start or end:
+        attempts.append((None, None, max(2, folds)))
+
+    errors = []
+    for start_value, end_value, folds_value in attempts:
+        try:
+            df = ABuSymbolPd.make_kl_df(symbol, n_folds=folds_value, start=start_value, end=end_value)
+        except Exception as exc:
+            errors.append(f"abupy(start={start_value},end={end_value}): {exc}")
+            continue
+        if df is not None and not getattr(df, "empty", False):
+            return df
+
+    market = _market_from_symbol(symbol)
+    if market in CN_MARKETS or market == "CN":
+        try:
+            df = _fetch_akshare_df(symbol, start, end, folds)
+            if df is not None and not getattr(df, "empty", False):
+                if errors:
+                    logger.warning("abupy fetch failed for %s, fallback to akshare succeeded", symbol)
+                return df
+        except Exception as exc:
+            errors.append(f"akshare: {exc}")
+
+    if errors:
+        logger.warning("kline fetch failed for %s: %s", symbol, errors[-1])
+    return None
+
+
 def _ensure_symbol_klines(
     db: Session,
     symbol: str,
@@ -304,12 +341,9 @@ def _ensure_symbol_klines(
     rows = crud.load_klines(db, market, symbol, start=start_date, end=end_date)
     if rows:
         return True
-    from abupy.MarketBu import ABuSymbolPd
 
     with _with_pg_data_env(market):
-        df = ABuSymbolPd.make_kl_df(symbol, n_folds=max(1, n_folds), start=start, end=end)
-        if (df is None or getattr(df, "empty", False)) and (start or end):
-            df = ABuSymbolPd.make_kl_df(symbol, n_folds=max(2, n_folds), start=None, end=None)
+        df = _load_symbol_kl_df(symbol, start=start, end=end, n_folds=n_folds)
     if df is None or getattr(df, "empty", False):
         return False
     df_rows = _kl_rows_from_df(df, market, symbol)
@@ -421,7 +455,16 @@ def _get_pg_market_source():
                     source_cls = source_dict.get(source_value)
                     if not source_cls:
                         continue
-                    df = source_cls(self._symbol).kline(n_folds=n_folds, start=start, end=end)
+                    try:
+                        df = source_cls(self._symbol).kline(n_folds=n_folds, start=start, end=end)
+                    except Exception as exc:
+                        logger.debug(
+                            "market source fetch failed symbol=%s source=%s err=%s",
+                            symbol_value,
+                            source_value,
+                            exc,
+                        )
+                        continue
                     if df is not None and not getattr(df, "empty", False):
                         break
                 if df is None or getattr(df, "empty", False):

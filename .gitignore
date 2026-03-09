@@ -9,3 +9,4 @@ test.py
 /abupy/RomDataBu/df_kl.h5
 /frontend/node_modules/*
 /backend/.venv/*
+.venv/*

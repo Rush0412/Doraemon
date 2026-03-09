@@ -15,8 +15,6 @@ def _run_job(job_id: int):
         crud.set_quant_job_running(db, job)
 
         if job.type == "kl_update":
-            from abupy.MarketBu import ABuSymbolPd
-
             market = (job.params.get("market") or "CN").upper()
             raw_symbols = job.params.get("symbols")
             symbols = _normalize_symbols(raw_symbols, market)
@@ -40,7 +38,7 @@ def _run_job(job_id: int):
             missing_symbols = []
             with _with_pg_data_env(market):
                 for symbol in symbols:
-                    kl = ABuSymbolPd.make_kl_df(symbol, n_folds=n_folds, start=start, end=end)
+                    kl = _load_symbol_kl_df(symbol, start=start, end=end, n_folds=n_folds)
                     if kl is None or getattr(kl, "empty", False):
                         missing_symbols.append(symbol)
                         continue
