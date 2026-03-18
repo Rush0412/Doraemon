@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from . import crud, schemas
 from .database import get_db
+from .job_runtime import expire_stale_job, expire_stale_jobs
 from .quant_service import _run_job, executor
 
 jobs_router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -16,7 +17,9 @@ jobs_router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 @jobs_router.get("/", response_model=schemas.APIResponse)
 def list_jobs(limit: int = 50, db: Session = Depends(get_db)):
-    jobs = crud.list_quant_jobs(db, limit=limit)
+    safe_limit = max(1, min(limit, 500))
+    jobs = crud.list_quant_jobs(db, limit=safe_limit)
+    jobs = expire_stale_jobs(db, jobs)
     return schemas.APIResponse(data=[schemas.QuantJobRead.model_validate(job) for job in jobs])
 
 
@@ -27,23 +30,82 @@ def create_job(payload: schemas.QuantJobCreate, db: Session = Depends(get_db)):
     return schemas.APIResponse(message="Job queued", data=schemas.QuantJobRead.model_validate(job))
 
 
+@jobs_router.post("/batch-delete", response_model=schemas.APIResponse)
+def batch_delete_jobs(payload: schemas.JobBatchDeletePayload, db: Session = Depends(get_db)):
+    statuses = {str(item).strip().lower() for item in (payload.statuses or []) if str(item).strip()}
+    scan_limit = max(1, min(int(payload.scan_limit), 10000))
+
+    if payload.ids:
+        candidates = []
+        for job_id in payload.ids:
+            job = crud.get_quant_job(db, int(job_id))
+            if job:
+                candidates.append(job)
+    else:
+        candidates = crud.list_quant_jobs(db, limit=scan_limit)
+    candidates = expire_stale_jobs(db, candidates)
+
+    if not candidates:
+        return schemas.APIResponse(
+            message="No jobs matched",
+            data={"deleted_ids": [], "skipped_running_ids": [], "matched": 0},
+        )
+
+    deleted_ids = []
+    skipped_running_ids = []
+    for job in candidates:
+        status_lower = str(job.status or "").lower()
+        if payload.ids:
+            eligible = True
+        elif statuses:
+            eligible = status_lower in statuses
+        elif payload.delete_finished:
+            eligible = status_lower in {"succeeded", "failed", "cancelled"}
+        else:
+            eligible = False
+
+        if not eligible:
+            continue
+        if status_lower == "running":
+            skipped_running_ids.append(job.id)
+            continue
+        crud.delete_quant_job(db, job)
+        deleted_ids.append(job.id)
+
+    return schemas.APIResponse(
+        message="Batch delete completed",
+        data={
+            "deleted_ids": deleted_ids,
+            "skipped_running_ids": skipped_running_ids,
+            "matched": len(candidates),
+        },
+    )
+
+
 @jobs_router.get("/{job_id}", response_model=schemas.APIResponse)
 def get_job(job_id: int, db: Session = Depends(get_db)):
     job = crud.get_quant_job(db, job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    job = expire_stale_job(db, job)
     return schemas.APIResponse(data=schemas.QuantJobRead.model_validate(job))
 
 
 @jobs_router.delete("/{job_id}", response_model=schemas.APIResponse)
-def delete_job(job_id: int, db: Session = Depends(get_db)):
+def delete_job(job_id: int, force: bool = False, db: Session = Depends(get_db)):
     job = crud.get_quant_job(db, job_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-    if job.status == "running":
+    job = expire_stale_job(db, job)
+    if job.status == "running" and not force:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is running")
     crud.delete_quant_job(db, job)
-    return schemas.APIResponse(message="Job deleted", data={"id": job_id})
+    if job.status == "running":
+        return schemas.APIResponse(
+            message="Running job removed from queue",
+            data={"id": job_id, "forced": True},
+        )
+    return schemas.APIResponse(message="Job deleted", data={"id": job_id, "forced": False})
 
 
 @jobs_router.get("/{job_id}/export")

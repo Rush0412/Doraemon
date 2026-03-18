@@ -221,12 +221,14 @@ def _normalize_symbol(symbol: str, market: str) -> Optional[str]:
     return sym
 
 
-def _normalize_symbols(raw, market: str) -> list[str]:
+def _normalize_symbols(raw, market: str, fallback_default: bool = True) -> list[str]:
     symbols = [_normalize_symbol(item, market) for item in _split_symbols(raw)]
     symbols = [item for item in symbols if item]
     if symbols:
         return symbols
-    return DEFAULT_SYMBOLS.get(market, DEFAULT_SYMBOLS["US"])
+    if fallback_default:
+        return DEFAULT_SYMBOLS.get(market, DEFAULT_SYMBOLS["US"])
+    return []
 
 
 @contextmanager

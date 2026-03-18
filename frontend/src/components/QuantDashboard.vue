@@ -33,7 +33,6 @@
         </div>
       </div>
     </section>
-
     <section class="flow-nav">
       <div class="flow-track">
         <button
@@ -59,8 +58,6 @@
         </div>
       </div>
     </section>
-
-    
     <PreparePanel
       :active="activeTab === 'prepare'"
       :store="store"
@@ -69,8 +66,11 @@
       v-model:kind="kind"
       v-model:pageSize="pageSize"
       v-model:selectedPortfolio="selectedPortfolio"
+      v-model:portfolioDraftName="portfolioDraftName"
       :selected-symbols="selectedSymbols"
       :saved-portfolios="savedPortfolios"
+      :portfolio-save-open="portfolioSaveOpen"
+      :portfolio-save-error="portfolioSaveError"
       :update-form="updateForm"
       :last-update-summary="lastUpdateSummary"
       :total-pages="totalPages"
@@ -89,6 +89,8 @@
       :is-selected="isSelected"
       :clear-symbols="clearSymbols"
       :save-selection="saveSelection"
+      :confirm-save-selection="confirmSaveSelection"
+      :cancel-save-selection="cancelSaveSelection"
       :load-portfolio="loadPortfolio"
       :delete-portfolio="deletePortfolio"
       :remove-symbol="removeSymbol"
@@ -96,8 +98,6 @@
       :apply-page-size="applyPageSize"
       :run-kl-update="runKlUpdate"
     />
-
-    
     <StrategyPanel
       :active="activeTab === 'strategy'"
       :backtest-form="backtestForm"
@@ -174,8 +174,6 @@
       :set-kline-container="setKlineContainer"
       :set-equity-container="setEquityContainer"
     />
-
-    
     <AnalysisPanel
       :active="activeTab === 'tools'"
       :tool-form="toolForm"
@@ -189,7 +187,6 @@
       :sync-analysis-to-chart="syncAnalysisToChart"
       :actions-busy="actionsBusy"
     />
-
     <MlPanel
       :active="activeTab === 'ml'"
       :actions-busy="actionsBusy"
@@ -199,20 +196,25 @@
       :ml-feature-form="mlFeatureForm"
       :ml-train-form="mlTrainForm"
       :ml-predict-form="mlPredictForm"
+      :ml-select-form="mlSelectForm"
       :ml-feature-result="mlFeatureResult"
       :ml-train-result="mlTrainResult"
       :ml-predict-result="mlPredictResult"
+      :ml-select-result="mlSelectResult"
       :ml-models="store.mlModels"
       :ml-predictions="store.mlPredictions"
       :run-ml-feature-build="runMlFeatureBuild"
       :run-ml-train="runMlTrain"
       :run-ml-predict="runMlPredict"
+      :run-ml-stock-select="runMlStockSelect"
       :run-ml-pipeline="runMlPipeline"
+      :run-market-model-pipeline="runMarketModelPipeline"
       :refresh-ml-data="refreshMlData"
+      :use-ml-model="useMlModel"
       :promote-ml-model="promoteMlModel"
       :apply-prediction-to-backtest="applyPredictionToBacktest"
+      :apply-prediction-to-pool="applyPredictionToPool"
     />
-
     <JobsPanel
       :active="activeTab === 'jobs'"
       :store="store"
@@ -221,14 +223,14 @@
       :export-url="exportUrl"
       :select-job="selectJob"
       :remove-job="removeJob"
+      :batch-delete-finished="batchDeleteFinished"
+      :batch-delete-failed="batchDeleteFailed"
       :active-params-text="activeParamsText"
       :active-result-text="activeResultText"
       :active-error-text="activeErrorText"
     />
-
   </div>
 </template>
-
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import PreparePanel from './quant/PreparePanel.vue'
@@ -239,6 +241,7 @@ import JobsPanel from './quant/JobsPanel.vue'
 import { useBacktestCharts } from './quant/composables/useBacktestCharts'
 import { useMlWorkflow } from './quant/composables/useMlWorkflow'
 import { useOperationSuggestion } from './quant/composables/useOperationSuggestion'
+import { usePortfolioSelection } from './quant/composables/usePortfolioSelection'
 import { useQuantSettings } from './quant/composables/useQuantSettings'
 import {
   displayExchange,
@@ -268,7 +271,6 @@ import {
   formatTime
 } from './quant/utils/dashboardFormatters'
 import { useQuantStore } from '../stores/quantStore'
-
 const store = useQuantStore()
 const tabs = [
   {
@@ -328,8 +330,6 @@ const query = ref(store.query)
 const kind = ref(store.kind)
 const pageSize = ref(store.pageSize)
 const selectedSymbols = ref([])
-const savedPortfolios = ref([])
-const selectedPortfolio = ref('')
 const chartSymbol = ref('')
 const orderFilter = ref('all')
 const selectedOrderKey = ref('')
@@ -341,11 +341,9 @@ const gridExploreAllStrategies = ref(true)
 const flowRunning = ref(false)
 const orderPage = ref(1)
 const orderPageSize = ref(20)
-
 const setAnalysisOverlayEnabled = (value) => {
   analysisOverlayEnabled.value = value
 }
-
 const updateForm = reactive({
   market: market.value,
   n_folds: 1,
@@ -355,7 +353,6 @@ const updateForm = reactive({
   how: 'thread',
   symbols: ''
 })
-
 const backtestForm = reactive({
   market: market.value,
   symbols: '',
@@ -367,14 +364,12 @@ const backtestForm = reactive({
   start: '',
   end: ''
 })
-
 const buyStrategyId = ref('breakout')
 const sellStrategyId = ref('atr_stop')
 const buyStrategyParams = reactive({})
 const sellStrategyParams = reactive({})
 const gridBuyParamLists = reactive({})
 const gridSellParamLists = reactive({})
-
 const gridForm = reactive({
   market: market.value,
   symbols: '',
@@ -412,7 +407,6 @@ if (!gridForm.ranking_weights || typeof gridForm.ranking_weights !== 'object') {
     drawdown: 1.0
   }
 }
-
 const toolForm = reactive({
   market: market.value,
   tool: 'support_resistance',
@@ -422,7 +416,6 @@ const toolForm = reactive({
   end: '',
   limit: 200
 })
-
 const toolOptions = reactive({
   only_last: true,
   mode: 'stats',
@@ -440,17 +433,13 @@ const toolOptions = reactive({
   distance_type: 'manhattan',
   field: 'p_change'
 })
-
 const formatSelectedSymbol = (symbol, fallbackMarket = backtestForm.market) =>
   formatSelectedSymbolUtil(symbol, fallbackMarket)
-
 const formatSymbolText = (rawSymbols, fallbackMarket = backtestForm.market) =>
   formatSymbolTextUtil(rawSymbols, fallbackMarket)
-
 const actionsBusy = computed(
   () => store.jobsLoading || store.activeJobLoading || store.symbolsLoading || flowRunning.value
 )
-
 const buyStrategies = computed(() => store.strategies?.buy || [])
 const sellStrategies = computed(() => store.strategies?.sell || [])
 const activeBuyStrategy = computed(() =>
@@ -459,11 +448,9 @@ const activeBuyStrategy = computed(() =>
 const activeSellStrategy = computed(() =>
   sellStrategies.value.find((item) => item.id === sellStrategyId.value) || null
 )
-
 if (!backtestForm.symbols) backtestForm.symbols = defaultSymbolForMarket(market.value)
 if (!gridForm.symbols) gridForm.symbols = defaultSymbolForMarket(market.value)
 if (!toolForm.symbols) toolForm.symbols = defaultSymbolForMarket(market.value)
-
 watch(market, (val) => {
   updateForm.market = val
   backtestForm.market = val
@@ -473,7 +460,6 @@ watch(market, (val) => {
   if (!gridForm.symbols) gridForm.symbols = defaultSymbolForMarket(val)
   if (!toolForm.symbols) toolForm.symbols = defaultSymbolForMarket(val)
 })
-
 watch(
   () => backtestForm.symbols,
   (val) => {
@@ -481,7 +467,6 @@ watch(
     if (normalized !== val) backtestForm.symbols = normalized
   }
 )
-
 watch(
   () => gridForm.symbols,
   (val) => {
@@ -489,7 +474,6 @@ watch(
     if (normalized !== val) gridForm.symbols = normalized
   }
 )
-
 watch(
   () => toolForm.symbols,
   (val) => {
@@ -497,7 +481,6 @@ watch(
     if (normalized !== val) toolForm.symbols = normalized
   }
 )
-
 watch(buyStrategies, (list) => {
   if (!list.length) return
   if (!list.find((item) => item.id === buyStrategyId.value)) {
@@ -506,7 +489,6 @@ watch(buyStrategies, (list) => {
   applyStrategyDefaults(activeBuyStrategy.value, buyStrategyParams)
   applyGridDefaults(activeBuyStrategy.value, gridBuyParamLists, gridForm)
 })
-
 watch(sellStrategies, (list) => {
   if (!list.length) return
   if (!list.find((item) => item.id === sellStrategyId.value)) {
@@ -515,17 +497,14 @@ watch(sellStrategies, (list) => {
   applyStrategyDefaults(activeSellStrategy.value, sellStrategyParams)
   applyGridDefaults(activeSellStrategy.value, gridSellParamLists, gridForm)
 })
-
 watch(buyStrategyId, () => {
   resetStrategyParams(activeBuyStrategy.value, buyStrategyParams)
   resetGridParamLists(activeBuyStrategy.value, gridBuyParamLists, gridForm)
 })
-
 watch(sellStrategyId, () => {
   resetStrategyParams(activeSellStrategy.value, sellStrategyParams)
   resetGridParamLists(activeSellStrategy.value, gridSellParamLists, gridForm)
 })
-
 watch(
   () => backtestForm.buy_xd,
   (val) => {
@@ -534,7 +513,6 @@ watch(
     }
   }
 )
-
 watch(
   () => [backtestForm.stop_loss_n, backtestForm.stop_win_n],
   ([loss, win]) => {
@@ -544,7 +522,6 @@ watch(
     }
   }
 )
-
 const jobStats = computed(() => {
   const stats = { total: 0, running: 0, succeeded: 0, failed: 0 }
   stats.total = store.jobs.length
@@ -555,24 +532,20 @@ const jobStats = computed(() => {
   }
   return stats
 })
-
 const lastUpdateSummary = computed(() => {
   const job = store.jobs.find((item) => item.type === 'kl_update' && item.status === 'succeeded')
   return job?.result || null
 })
-
 const latestJobByType = (type) => {
   if (!type) return null
   const jobs = store.jobs.filter((job) => job.type === type)
   if (!jobs.length) return null
   return jobs.reduce((latest, job) => (job.id > latest.id ? job : latest), jobs[0])
 }
-
 const backtestJob = computed(() => {
   if (store.activeJob && store.activeJob.type === 'backtest') return store.activeJob
   return latestJobByType('backtest')
 })
-
 const backtestSummary = computed(() => backtestJob.value?.result?.summary || null)
 const backtestTopSymbols = computed(() => {
   const rows = backtestJob.value?.result?.top_symbols
@@ -582,15 +555,12 @@ const backtestActionableCandidates = computed(() => {
   const rows = backtestJob.value?.result?.actionable_candidates
   return Array.isArray(rows) ? rows : []
 })
-
 const backtestOrders = computed(() => backtestJob.value?.result?.orders || [])
-
 const chartOrdersAll = computed(() => {
   const orders = backtestOrders.value || []
   if (!chartSymbol.value) return orders
   return orders.filter((item) => symbolEquals(item.symbol, chartSymbol.value))
 })
-
 const filteredOrders = computed(() => {
   const scoped = chartOrdersAll.value
   if (orderFilter.value === 'win') return scoped.filter((item) => resolveOrderProfit(item) > 0)
@@ -603,12 +573,10 @@ const filteredOrders = computed(() => {
   }
   return scoped
 })
-
 const orderTotalPages = computed(() => {
   const total = filteredOrders.value.length
   return Math.max(1, Math.ceil(total / orderPageSize.value))
 })
-
 const pagedOrders = computed(() => {
   const total = filteredOrders.value.length
   if (!total) return []
@@ -617,21 +585,18 @@ const pagedOrders = computed(() => {
   const end = start + orderPageSize.value
   return filteredOrders.value.slice(start, end)
 })
-
 const backtestSymbols = computed(() => {
   const raw = backtestJob.value?.result?.summary?.symbols || backtestJob.value?.params?.symbols
   if (Array.isArray(raw)) return raw
   if (typeof raw === 'string') return splitSymbolInput(raw)
   return []
 })
-
 const isClosedOrder = (order) => {
   if (!order) return false
   const sellDate = Number(order.sell_date || 0)
   const sellPrice = Number(order.sell_price)
   return sellDate > 0 && Number.isFinite(sellPrice) && sellPrice > 0
 }
-
 const backtestTradeStats = computed(() => {
   const orders = backtestOrders.value || []
   const closedOrders = orders.filter((item) => isClosedOrder(item))
@@ -649,7 +614,6 @@ const backtestTradeStats = computed(() => {
     avgProfit
   }
 })
-
 const showBacktestVisual = computed(() => {
   return (
     !!backtestSummary.value ||
@@ -658,22 +622,18 @@ const showBacktestVisual = computed(() => {
     (klineData.value && klineData.value.length > 0)
   )
 })
-
 const chartWindow = reactive({
   size: 220,
   offset: 0
 })
-
 const gridJob = computed(() => {
   if (store.activeJob && store.activeJob.type === 'grid_search') return store.activeJob
   return latestJobByType('grid_search')
 })
-
 const stockSelectJob = computed(() => {
   if (store.activeJob && store.activeJob.type === 'stock_select') return store.activeJob
   return latestJobByType('stock_select')
 })
-
 const stockSelectSummary = computed(() => stockSelectJob.value?.result?.summary || null)
 const stockSelectDiagnostics = computed(() => stockSelectJob.value?.result?.diagnostics || null)
 const stockSelectTopSymbols = computed(() => {
@@ -685,7 +645,6 @@ const stockSelectActionableCandidates = computed(() => {
   return Array.isArray(rows) ? rows : []
 })
 const stockSelectRecommendation = computed(() => stockSelectJob.value?.result?.recommendation || null)
-
 const gridSummary = computed(() => gridJob.value?.result?.best || null)
 const gridDiagnostics = computed(() => gridJob.value?.result?.diagnostics || null)
 const gridTopSymbols = computed(() => {
@@ -702,7 +661,6 @@ const gridErrors = computed(() => {
   return Array.isArray(rows) ? rows : []
 })
 const gridNextParamSuggestions = computed(() => gridJob.value?.result?.next_param_suggestions || null)
-
 const pickGridMetric = (run, key, fallback = 0) => {
   if (!run) return fallback
   const validationValue = run[`validation_${key}`]
@@ -715,7 +673,6 @@ const pickGridMetric = (run, key, fallback = 0) => {
   }
   return fallback
 }
-
 const gridTopRuns = computed(() => {
   const runs = Array.isArray(gridJob.value?.result?.runs) ? gridJob.value.result.runs : []
   return runs.slice(0, 10).map((run, idx) => ({
@@ -733,27 +690,22 @@ const gridTopRuns = computed(() => {
     )
   }))
 })
-
 const analysisResult = computed(() => {
   if (!store.activeJob || store.activeJob.type !== 'analysis') return null
   return store.activeJob.result || null
 })
-
 const gridSummaryText = computed(() =>
   gridSummary.value ? JSON.stringify(gridSummary.value, null, 2) : ''
 )
-
 const analysisText = computed(() =>
   analysisResult.value ? JSON.stringify(analysisResult.value, null, 2) : ''
 )
-
 const { adviceProfile, adviceTemplates, operationSuggestion } = useOperationSuggestion({
   analysisResult,
   backtestTradeStats,
   gridSummary,
   gridTopRuns
 })
-
 const { settingsReady, restoreQuantSettings, scheduleSaveQuantSettings, clearSettingsSaveTimer } = useQuantSettings({
   market,
   query,
@@ -774,7 +726,6 @@ const { settingsReady, restoreQuantSettings, scheduleSaveQuantSettings, clearSet
   adviceProfile,
   adviceTemplates
 })
-
 const applyGridCandidateToBacktest = async (candidate) => {
   if (!candidate) return
   if (candidate.buy_strategy) {
@@ -825,15 +776,12 @@ const applyGridCandidateToBacktest = async (candidate) => {
   if (candidate.market) backtestForm.market = candidate.market
   activeTab.value = 'strategy'
 }
-
 const applyGridToBacktest = async () => {
   await applyGridCandidateToBacktest(gridSummary.value)
 }
-
 const applyGridRunToBacktest = async (run) => {
   await applyGridCandidateToBacktest(run)
 }
-
 const applyGridNextSuggestions = () => {
   const next = gridNextParamSuggestions.value
   if (!next || typeof next !== 'object') return
@@ -850,7 +798,6 @@ const applyGridNextSuggestions = () => {
     })
   }
 }
-
 const applySymbolToBacktest = (symbol) => {
   if (!symbol) return
   const text = String(symbol).trim()
@@ -860,7 +807,6 @@ const applySymbolToBacktest = (symbol) => {
   chartSymbol.value = text
   activeTab.value = 'strategy'
 }
-
 const applySymbolToAnalysis = async (symbol) => {
   if (!symbol) return
   const text = String(symbol).trim()
@@ -870,7 +816,6 @@ const applySymbolToAnalysis = async (symbol) => {
   activeTab.value = 'tools'
   await runTool()
 }
-
 const {
   klineData,
   equityData,
@@ -910,7 +855,6 @@ const {
   activeTab,
   toolForm
 })
-
 watch(backtestSummary, (val) => {
   if (!val) return
   const symbols = backtestSymbols.value
@@ -924,52 +868,42 @@ watch(backtestSummary, (val) => {
     updateEquityChart()
   })
 })
-
 watch(chartSymbol, (val, oldVal) => {
   if (!val || val === oldVal) return
   loadKlineChart()
 })
-
 watch(
   () => [chartWindow.size, chartWindow.offset, klineData.value.length],
   () => {
     if (klineData.value.length) updateChartData()
   }
 )
-
 watch(filteredOrders, () => {
   orderPage.value = 1
   syncSelectedOrder()
   if (klineData.value.length) updateChartData()
   updateEquityChart()
 })
-
 watch(selectedOrderKey, () => {
   syncSelectedOrder()
 })
-
 watch(orderPageSize, () => {
   orderPage.value = 1
 })
-
 watch(selectedOrder, () => {
   applyOrderLines()
 })
-
 watch(showStopLines, () => {
   applyOrderLines()
 })
-
 watch([analysisResult, analysisOverlayEnabled], () => {
   if (klineData.value.length) applyAnalysisOverlay()
 })
-
 watch(activeTab, async (val) => {
   if (val !== 'strategy') return
   await nextTick()
   handleResize()
 })
-
 watch(
   () => [
     market.value,
@@ -986,7 +920,6 @@ watch(
     scheduleSaveQuantSettings()
   }
 )
-
 watch(backtestForm, scheduleSaveQuantSettings, { deep: true })
 watch(gridForm, scheduleSaveQuantSettings, { deep: true })
 watch(toolForm, scheduleSaveQuantSettings, { deep: true })
@@ -996,7 +929,6 @@ watch(sellStrategyParams, scheduleSaveQuantSettings, { deep: true })
 watch(gridBuyParamLists, scheduleSaveQuantSettings, { deep: true })
 watch(gridSellParamLists, scheduleSaveQuantSettings, { deep: true })
 watch(adviceTemplates, scheduleSaveQuantSettings, { deep: true })
-
 const activeParamsText = computed(() =>
   store.activeJob?.params ? JSON.stringify(store.activeJob.params, null, 2) : ''
 )
@@ -1006,7 +938,6 @@ const activeResultText = computed(() =>
 const activeErrorText = computed(() =>
   store.activeJob?.error ? String(store.activeJob.error) : ''
 )
-
 const toolOptionMode = computed(() => {
   if (toolForm.tool === 'support_resistance') return 'support'
   if (toolForm.tool === 'jump_gap') return 'jump'
@@ -1017,9 +948,7 @@ const toolOptionMode = computed(() => {
   if (toolForm.tool === 'distance') return 'distance'
   return 'base'
 })
-
 const totalPages = computed(() => Math.max(1, Math.ceil(store.total / store.pageSize)))
-
 const search = async () => {
   await store.searchSymbols({
     market: market.value,
@@ -1029,7 +958,6 @@ const search = async () => {
     pageSize: pageSize.value
   })
 }
-
 const importSymbols = async () => {
   const data = await store.importSymbols(market.value)
   if (data) {
@@ -1042,7 +970,6 @@ const importSymbols = async () => {
     })
   }
 }
-
 const importAllSymbols = async () => {
   const data = await store.importSymbols('CN')
   if (data) {
@@ -1055,20 +982,27 @@ const importAllSymbols = async () => {
     })
   }
 }
-
 const refreshJobs = async () => {
   await store.fetchJobs()
 }
-
 const selectJob = async (id) => {
   await store.fetchJob(id)
 }
-
 const removeJob = async (job) => {
-  if (job.status === 'running') return
-  await store.deleteJob(job.id)
+  await store.deleteJob(job.id, { force: job.status === 'running' })
 }
-
+const batchDeleteFinished = async () => {
+  const result = await store.deleteJobsBatch({ delete_finished: true })
+  if ((result.deleted_ids || []).length === 0) {
+    await store.fetchJobs()
+  }
+}
+const batchDeleteFailed = async () => {
+  const result = await store.deleteJobsBatch({ statuses: ['failed'], delete_finished: false })
+  if ((result.deleted_ids || []).length === 0) {
+    await store.fetchJobs()
+  }
+}
 const exportUrl = (id, format, section) => {
   const params = new URLSearchParams()
   if (format) params.set('format', format)
@@ -1076,15 +1010,12 @@ const exportUrl = (id, format, section) => {
   const qs = params.toString()
   return `/api/v1/jobs/${encodeURIComponent(String(id))}/export${qs ? `?${qs}` : ''}`
 }
-
-const addSymbol = (symbol) => {
+function addSymbol(symbol) {
   if (!symbol || selectedSymbols.value.includes(symbol)) return
   selectedSymbols.value = [...selectedSymbols.value, symbol]
   syncSelectedSymbols()
 }
-
 const isSelected = (symbol) => selectedSymbols.value.includes(symbol)
-
 const toggleSymbol = (symbol) => {
   if (isSelected(symbol)) {
     removeSymbol(symbol)
@@ -1092,24 +1023,20 @@ const toggleSymbol = (symbol) => {
   }
   addSymbol(symbol)
 }
-
 const removeSymbol = (symbol) => {
   selectedSymbols.value = selectedSymbols.value.filter((item) => item !== symbol)
   syncSelectedSymbols()
 }
-
 const clearSymbols = () => {
   selectedSymbols.value = []
   syncSelectedSymbols()
 }
-
 const selectPage = () => {
   const pageSymbols = store.symbols.map((item) => item.symbol)
   const merged = new Set([...selectedSymbols.value, ...pageSymbols])
   selectedSymbols.value = Array.from(merged)
   syncSelectedSymbols()
 }
-
 const invertPage = () => {
   const pageSymbols = new Set(store.symbols.map((item) => item.symbol))
   const next = selectedSymbols.value.filter((symbol) => !pageSymbols.has(symbol))
@@ -1121,47 +1048,6 @@ const invertPage = () => {
   selectedSymbols.value = next
   syncSelectedSymbols()
 }
-
-const saveSelection = () => {
-  const name = window.prompt('淇濆瓨缁勫悎鍚嶇О')
-  if (!name) return
-  const trimmed = name.trim()
-  if (!trimmed) return
-  const payload = { name: trimmed, symbols: selectedSymbols.value }
-  localStorage.setItem(`doraemon_portfolio_${trimmed}`, JSON.stringify(payload))
-  const indexKey = 'doraemon_portfolios'
-  const list = JSON.parse(localStorage.getItem(indexKey) || '[]')
-  if (!list.includes(trimmed)) list.push(trimmed)
-  localStorage.setItem(indexKey, JSON.stringify(list))
-  savedPortfolios.value = list
-  selectedPortfolio.value = trimmed
-}
-
-const loadPortfolio = () => {
-  if (!selectedPortfolio.value) return
-  const raw = localStorage.getItem(`doraemon_portfolio_${selectedPortfolio.value}`)
-  if (!raw) return
-  try {
-    const parsed = JSON.parse(raw)
-    selectedSymbols.value = Array.isArray(parsed.symbols) ? parsed.symbols : []
-    syncSelectedSymbols()
-  } catch {
-    // ignore malformed payload
-  }
-}
-
-const deletePortfolio = () => {
-  if (!selectedPortfolio.value) return
-  localStorage.removeItem(`doraemon_portfolio_${selectedPortfolio.value}`)
-  const indexKey = 'doraemon_portfolios'
-  const list = JSON.parse(localStorage.getItem(indexKey) || '[]').filter(
-    (name) => name !== selectedPortfolio.value
-  )
-  localStorage.setItem(indexKey, JSON.stringify(list))
-  savedPortfolios.value = list
-  selectedPortfolio.value = ''
-}
-
 const syncSelectedSymbols = () => {
   const text = normalizeSymbolsInputForUi(selectedSymbols.value.join(', '))
   backtestForm.symbols = text
@@ -1170,7 +1056,23 @@ const syncSelectedSymbols = () => {
   syncMlSymbols(text)
   updateForm.symbols = text
 }
-
+const {
+  savedPortfolios,
+  selectedPortfolio,
+  portfolioDraftName,
+  portfolioSaveOpen,
+  portfolioSaveError,
+  refreshPortfolioIndex,
+  openSaveSelection: saveSelection,
+  cancelSaveSelection,
+  confirmSaveSelection,
+  loadPortfolio,
+  deletePortfolio
+} = usePortfolioSelection({
+  selectedSymbols,
+  syncSelectedSymbols,
+  splitSymbolInput
+})
 const changePage = async (nextPage) => {
   if (nextPage < 1 || nextPage > totalPages.value) return
   await store.searchSymbols({
@@ -1181,7 +1083,6 @@ const changePage = async (nextPage) => {
     pageSize: pageSize.value
   })
 }
-
 const applyPageSize = async () => {
   await store.searchSymbols({
     market: market.value,
@@ -1191,17 +1092,22 @@ const applyPageSize = async () => {
     pageSize: pageSize.value
   })
 }
-
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-
 const waitForJobDone = async (jobId, timeoutMs = 20 * 60 * 1000, pollMs = 1200) => {
   const startedAt = Date.now()
   while (Date.now() - startedAt <= timeoutMs) {
-    await store.fetchJob(jobId)
-    const current = store.activeJob
-    if (current?.id === jobId && (current.status === 'succeeded' || current.status === 'failed')) {
+    let current = null
+    try {
+      current = await store.fetchJob(jobId, { silent: true })
+    } catch (err) {
+      if (err?.response?.status === 404) {
+        throw new Error(`任务 ${jobId} 已被移除`)
+      }
+      throw err
+    }
+    if (current?.id === jobId && ['succeeded', 'failed', 'cancelled'].includes(current.status)) {
       await store.fetchJobs()
-      if (current.status === 'failed') {
+      if (current.status === 'failed' || current.status === 'cancelled') {
         throw new Error(current.error || `任务 ${jobId} 执行失败`)
       }
       return current
@@ -1210,22 +1116,52 @@ const waitForJobDone = async (jobId, timeoutMs = 20 * 60 * 1000, pollMs = 1200) 
   }
   throw new Error(`任务 ${jobId} 超时未完成`)
 }
-
+function buildMlStockSelectPayload(form) {
+  return {
+    market: form.market,
+    target: form.target || 'y_up_5d',
+    model_id: form.model_id || undefined,
+    symbols: form.symbols || undefined,
+    min_score: Number(form.min_score || 0.55),
+    prediction_limit: Number(form.prediction_limit || 300),
+    candidate_limit: Number(form.candidate_limit || 120),
+    symbol_top_n: Number(form.symbol_top_n || 20),
+    symbol_eval_limit: Number(form.symbol_eval_limit || 120),
+    min_kline_rows: Number(form.min_kline_rows || 120),
+    n_folds: backtestForm.n_folds,
+    start: backtestForm.start || undefined,
+    end: backtestForm.end || undefined,
+    cash: backtestForm.cash,
+    buy_xd: backtestForm.buy_xd,
+    stop_loss_n: backtestForm.stop_loss_n,
+    stop_win_n: backtestForm.stop_win_n,
+    buy_strategy: buyStrategyId.value,
+    buy_params: { ...buyStrategyParams },
+    sell_strategy: sellStrategyId.value,
+    sell_params: { ...sellStrategyParams }
+  }
+}
 const {
   mlRunning,
   mlFeatureForm,
   mlTrainForm,
   mlPredictForm,
+  mlSelectForm,
   mlFeatureResult,
   mlTrainResult,
   mlPredictResult,
+  mlSelectResult,
   refreshMlData,
   runMlFeatureBuild,
   runMlTrain,
   runMlPredict,
+  runMlStockSelect,
   runMlPipeline,
+  runMarketModelPipeline,
+  useMlModel,
   promoteMlModel,
   applyPredictionToBacktest,
+  applyPredictionToPool,
   syncSymbols: syncMlSymbols
 } = useMlWorkflow({
   store,
@@ -1233,9 +1169,10 @@ const {
   waitForJobDone,
   inferMarketBySymbols,
   normalizeSymbolsInputForUi,
-  onUsePrediction: applySymbolToBacktest
+  onUsePrediction: applySymbolToBacktest,
+  onAddPrediction: addSymbol,
+  buildMlStockSelectPayload
 })
-
 const buildBacktestPayload = () => {
   const effectiveMarket = inferMarketBySymbols(backtestForm.symbols, backtestForm.market)
   backtestForm.market = effectiveMarket
@@ -1257,7 +1194,6 @@ const buildBacktestPayload = () => {
     actions_preview_limit: 8000
   }
 }
-
 const buildStockSelectPayload = () => {
   const rawSymbols = String(backtestForm.symbols || '').trim()
   const fallbackCandidateLimit = Math.max(Number(gridForm.symbol_eval_limit || 120), Number(gridForm.symbol_top_n || 10) * 3)
@@ -1284,12 +1220,10 @@ const buildStockSelectPayload = () => {
     sell_params: { ...sellStrategyParams }
   }
 }
-
 const runVerify = async () => {
   const job = await store.startVerify()
   await store.fetchJob(job.id)
 }
-
 const runKlUpdate = async () => {
   const symbols = selectedSymbols.value.length ? selectedSymbols.value.join(',') : ''
   const job = await store.startKlUpdate({
@@ -1304,25 +1238,22 @@ const runKlUpdate = async () => {
   })
   await store.fetchJob(job.id)
 }
-
 const runBacktest = async () => {
   const job = await store.startBacktest(buildBacktestPayload())
   await store.fetchJob(job.id)
   return job
 }
-
 const runStockSelect = async () => {
   const job = await store.startStockSelect(buildStockSelectPayload())
   await store.fetchJob(job.id)
   return job
 }
-
 const runClosedLoop = async () => {
   flowRunning.value = true
   klineError.value = ''
   try {
     const selectQueued = await store.startStockSelect(buildStockSelectPayload())
-    const selectDone = await waitForJobDone(selectQueued.id)
+    const selectDone = await waitForJobDone(selectQueued.id, 90 * 60 * 1000)
     const selectResult = selectDone?.result || {}
     const topSymbols = Array.isArray(selectResult.top_symbols)
       ? selectResult.top_symbols.map((item) => String(item.symbol || '').trim()).filter(Boolean)
@@ -1330,14 +1261,11 @@ const runClosedLoop = async () => {
     if (!topSymbols.length) {
       throw new Error('独立选股未返回可回测标的，请调整范围后重试。')
     }
-
     const picked = topSymbols.slice(0, Math.max(1, Number(gridForm.symbol_top_n || 10)))
     backtestForm.symbols = normalizeSymbolsInputForUi(picked.join(', '))
     chartSymbol.value = picked[0]
-
     const backtestQueued = await store.startBacktest(buildBacktestPayload())
-    await waitForJobDone(backtestQueued.id)
-
+    await waitForJobDone(backtestQueued.id, 90 * 60 * 1000)
     toolForm.market = backtestForm.market
     toolForm.tool = 'support_resistance'
     toolForm.symbols = normalizeSymbolsInputForUi(picked[0])
@@ -1353,8 +1281,7 @@ const runClosedLoop = async () => {
       limit: toolForm.limit,
       options: buildToolOptions()
     })
-    await waitForJobDone(analysisQueued.id)
-
+    await waitForJobDone(analysisQueued.id, 20 * 60 * 1000)
     activeTab.value = 'strategy'
     await nextTick()
     await loadKlineChart()
@@ -1364,7 +1291,6 @@ const runClosedLoop = async () => {
     flowRunning.value = false
   }
 }
-
 const runGridSearch = async () => {
   const buyGrid = buildGridParamPayload(activeBuyStrategy.value, gridBuyParamLists)
   const sellGrid = buildGridParamPayload(activeSellStrategy.value, gridSellParamLists)
@@ -1419,7 +1345,6 @@ const runGridSearch = async () => {
   })
   await store.fetchJob(job.id)
 }
-
 const buildToolOptions = () => {
   const opts = {}
   if (toolForm.tool === 'support_resistance') opts.only_last = toolOptions.only_last
@@ -1451,7 +1376,6 @@ const buildToolOptions = () => {
   }
   return opts
 }
-
 const runTool = async () => {
   const effectiveMarket = inferMarketBySymbols(toolForm.symbols, toolForm.market)
   toolForm.market = effectiveMarket
@@ -1467,10 +1391,10 @@ const runTool = async () => {
   })
   await store.fetchJob(job.id)
 }
-
 onMounted(async () => {
-  savedPortfolios.value = JSON.parse(localStorage.getItem('doraemon_portfolios') || '[]')
+  refreshPortfolioIndex()
   window.addEventListener('resize', handleResize)
+  await restoreQuantSettings()
   await Promise.all([
     store.fetchJobs(),
     store.fetchStrategies(),
@@ -1483,17 +1407,13 @@ onMounted(async () => {
       pageSize: store.pageSize
     })
   ])
-  await restoreQuantSettings()
   syncMlSymbols(normalizeSymbolsInputForUi(backtestForm.symbols || ''))
   settingsReady.value = true
   scheduleSaveQuantSettings()
 })
-
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
   clearSettingsSaveTimer()
   cleanupCharts()
 })
 </script>
-
-

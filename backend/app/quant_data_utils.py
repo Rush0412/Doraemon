@@ -158,6 +158,10 @@ def _kl_df_from_rows(rows: list) -> Optional["pandas.DataFrame"]:
         if col in df.columns and df[col].isna().all():
             df.drop(columns=[col], inplace=True)
     df.index = pd.to_datetime(df["date"].astype(str))
+    try:
+        df.name = rows[0].symbol
+    except Exception:
+        pass
     return df
 
 
@@ -399,6 +403,10 @@ def _with_benchmark_fallback(fallback_symbol: Optional[str]):
                     session.close()
                 if df is None or getattr(df, "empty", False):
                     raise ValueError("Benchmark data unavailable; run kl_update for selected symbols first.") from exc
+                try:
+                    df.name = fallback_symbol
+                except Exception:
+                    pass
                 super().__init__(
                     benchmark=fallback_symbol,
                     start=start,

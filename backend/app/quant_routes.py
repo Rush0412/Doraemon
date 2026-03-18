@@ -17,8 +17,8 @@ def list_feature_map():
 
 
 @quant_router.post("/symbols/import", response_model=schemas.APIResponse)
-def import_symbols(payload: dict, db: Session = Depends(get_db)):
-    return service.import_symbols(payload, db)
+def import_symbols(payload: schemas.QuantPayloadBase, db: Session = Depends(get_db)):
+    return service.import_symbols(payload.model_dump(exclude_none=True), db)
 
 
 @quant_router.post("/symbols/manual", response_model=schemas.APIResponse)
@@ -62,43 +62,48 @@ def list_strategies():
 
 
 @quant_router.post("/kl/update", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
-def start_kl_update(payload: dict, db: Session = Depends(get_db)):
-    return service.start_kl_update(payload, db)
+def start_kl_update(payload: schemas.KlineUpdatePayload, db: Session = Depends(get_db)):
+    return service.start_kl_update(payload.model_dump(exclude_none=True), db)
 
 
 @quant_router.post("/backtest", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
-def start_backtest(payload: dict, db: Session = Depends(get_db)):
-    return service.start_backtest(payload, db)
+def start_backtest(payload: schemas.BacktestPayload, db: Session = Depends(get_db)):
+    return service.start_backtest(payload.model_dump(exclude_none=True), db)
 
 
 @quant_router.post("/grid-search", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
-def start_grid_search(payload: dict, db: Session = Depends(get_db)):
-    return service.start_grid_search(payload, db)
+def start_grid_search(payload: schemas.GridSearchPayload, db: Session = Depends(get_db)):
+    return service.start_grid_search(payload.model_dump(exclude_none=True), db)
 
 
 @quant_router.post("/stock-select", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
-def start_stock_select(payload: dict, db: Session = Depends(get_db)):
-    return service.start_stock_select(payload, db)
+def start_stock_select(payload: schemas.BacktestPayload, db: Session = Depends(get_db)):
+    return service.start_stock_select(payload.model_dump(exclude_none=True), db)
 
 
 @quant_router.post("/tools", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
-def start_quant_tools(payload: dict, db: Session = Depends(get_db)):
-    return service.start_quant_tools(payload, db)
+def start_quant_tools(payload: schemas.AnalysisPayload, db: Session = Depends(get_db)):
+    return service.start_quant_tools(payload.model_dump(exclude_none=True), db)
 
 
 @quant_router.post("/ml/features/build", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
-def start_ml_feature_build(payload: dict, db: Session = Depends(get_db)):
-    return service.start_ml_feature_build(payload, db)
+def start_ml_feature_build(payload: schemas.MLFeaturePayload, db: Session = Depends(get_db)):
+    return service.start_ml_feature_build(payload.model_dump(exclude_none=True), db)
 
 
 @quant_router.post("/ml/train", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
-def start_ml_train(payload: dict, db: Session = Depends(get_db)):
-    return service.start_ml_train(payload, db)
+def start_ml_train(payload: schemas.MLTrainPayload, db: Session = Depends(get_db)):
+    return service.start_ml_train(payload.model_dump(exclude_none=True), db)
 
 
 @quant_router.post("/ml/predict", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
-def start_ml_predict(payload: dict, db: Session = Depends(get_db)):
-    return service.start_ml_predict(payload, db)
+def start_ml_predict(payload: schemas.MLPredictPayload, db: Session = Depends(get_db)):
+    return service.start_ml_predict(payload.model_dump(exclude_none=True), db)
+
+
+@quant_router.post("/ml/stock-select", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
+def start_ml_stock_select(payload: schemas.MLStockSelectPayload, db: Session = Depends(get_db)):
+    return service.start_ml_stock_select(payload.model_dump(exclude_none=True), db)
 
 
 @quant_router.get("/ml/models", response_model=schemas.APIResponse)

@@ -4,6 +4,13 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from . import crud, schemas
+from .quant_ml_model_utils import (
+    ml_model_markets,
+    ml_model_scope,
+    ml_model_symbol_count,
+    recommended_market_model_min_symbol_count,
+    resolve_best_ml_model,
+)
 
 
 def list_ml_models(
@@ -13,16 +20,33 @@ def list_ml_models(
     limit: int = 100,
 ):
     rows = crud.list_ml_models(db, market=market, target=target, limit=limit)
+    recommended_id = None
+    try:
+        recommended = resolve_best_ml_model(
+            db,
+            market=market,
+            target=target,
+            require_market_scope=True,
+            min_symbol_count=recommended_market_model_min_symbol_count(db, market),
+            allow_fallback_to_best=True,
+        )
+        recommended_id = int(recommended.id)
+    except Exception:
+        recommended_id = None
     data = [
         {
             "id": item.id,
             "name": item.name,
             "market": item.market,
+            "markets": ml_model_markets(item),
             "target": item.target,
             "algo": item.algo,
             "feature_version": item.feature_version,
             "metrics": item.metrics or {},
             "params": item.params or {},
+            "scope": ml_model_scope(item),
+            "symbol_count": ml_model_symbol_count(item),
+            "is_recommended": bool(recommended_id and int(item.id) == recommended_id),
             "status": item.status,
             "is_active": bool(item.is_active),
             "train_start": item.train_start.isoformat() if item.train_start else None,

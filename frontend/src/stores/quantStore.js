@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
 import { api } from '../services/api'
 
+const isIgnorableRequestError = (err) => /request aborted|aborted|canceled|cancelled/i.test(String(err?.message || ''))
+
 export const useQuantStore = defineStore('quant', {
   state: () => ({
     market: 'SH',
@@ -29,8 +31,8 @@ export const useQuantStore = defineStore('quant', {
     _upsertJob(job) {
       if (!job || typeof job !== 'object') return
       const rows = Array.isArray(this.jobs) ? this.jobs : []
-      const rest = rows.filter((item) => item?.id !== job.id)
-      this.jobs = [job, ...rest]
+      const merged = [job, ...rows.filter((item) => item?.id !== job.id)]
+      this.jobs = merged.sort((a, b) => Number(b?.id || 0) - Number(a?.id || 0))
     },
     async searchSymbols({ market, q, kind, page, pageSize } = {}) {
       const nextMarket = market ?? this.market
@@ -85,18 +87,37 @@ export const useQuantStore = defineStore('quant', {
       if (!silent) this.activeJobLoading = true
       try {
         const { data } = await api.get(`/jobs/${id}`)
-        this.activeJob = data.data
-        this._upsertJob(data.data)
+        const job = data.data
+        this.activeJob = job
+        this._upsertJob(job)
+        return job
+      } catch (err) {
+        if (!silent) this.jobsError = err.message
+        throw err
       } finally {
         if (!silent) this.activeJobLoading = false
       }
     },
-    async deleteJob(id) {
-      await api.delete(`/jobs/${id}`)
+    async deleteJob(id, options = {}) {
+      const params = {}
+      if (options.force) params.force = true
+      await api.delete(`/jobs/${id}`, { params })
       this.jobs = this.jobs.filter((job) => job.id !== id)
       if (this.activeJob?.id === id) {
         this.activeJob = null
       }
+    },
+    async deleteJobsBatch(payload = { delete_finished: true }) {
+      const { data } = await api.post('/jobs/batch-delete', payload)
+      const deletedIds = Array.isArray(data?.data?.deleted_ids) ? data.data.deleted_ids : []
+      if (deletedIds.length) {
+        const idSet = new Set(deletedIds)
+        this.jobs = this.jobs.filter((job) => !idSet.has(job.id))
+        if (this.activeJob?.id && idSet.has(this.activeJob.id)) {
+          this.activeJob = null
+        }
+      }
+      return data.data || { deleted_ids: [], skipped_running_ids: [], matched: 0 }
     },
     async startVerify() {
       const { data } = await api.get('/quant/verify')
@@ -174,6 +195,13 @@ export const useQuantStore = defineStore('quant', {
       this._upsertJob(job)
       return job
     },
+    async startMlStockSelect(params = {}) {
+      const { data } = await api.post('/quant/ml/stock-select', params)
+      const job = data.data
+      this.activeJob = job
+      this._upsertJob(job)
+      return job
+    },
     async fetchMlModels({ market = 'CN', target = 'y_up_5d', limit = 100 } = {}) {
       this.mlLoading = true
       this.mlError = null
@@ -183,7 +211,9 @@ export const useQuantStore = defineStore('quant', {
         })
         this.mlModels = Array.isArray(data.data) ? data.data : []
       } catch (err) {
-        this.mlError = err.message
+        if (!isIgnorableRequestError(err)) {
+          this.mlError = err.message
+        }
       } finally {
         this.mlLoading = false
       }
@@ -197,7 +227,9 @@ export const useQuantStore = defineStore('quant', {
         const { data } = await api.get('/quant/ml/predictions', { params })
         this.mlPredictions = Array.isArray(data.data) ? data.data : []
       } catch (err) {
-        this.mlError = err.message
+        if (!isIgnorableRequestError(err)) {
+          this.mlError = err.message
+        }
       } finally {
         this.mlLoading = false
       }

@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from .config import get_settings
 from .database import Base, engine
+from .job_runtime import cleanup_stale_jobs
 from .routes import router
 from .schemas import APIResponse
 
@@ -25,7 +26,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger("doraemon")
 
-Base.metadata.create_all(bind=engine)
+if settings.auto_create_tables:
+    Base.metadata.create_all(bind=engine)
+    try:
+        expired = cleanup_stale_jobs()
+        if expired:
+            logger.info("expired %s stale running jobs on startup", expired)
+    except Exception:
+        logger.exception("stale job cleanup failed during startup")
 
 app = FastAPI(
     title=settings.app_name,
@@ -49,7 +57,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     logger.exception("%s %s failed", request.method, request.url.path)
     return JSONResponse(
         status_code=500,
-        content=APIResponse(message="Internal Server Error", data={"error": str(exc)}).model_dump(),
+        content=APIResponse(message="Internal Server Error", data={"error": "internal_error"}).model_dump(),
     )
 
 

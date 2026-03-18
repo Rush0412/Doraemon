@@ -8,7 +8,7 @@
         </div>
         <span class="pill">Symbols</span>
       </header>
-      <p class="panel-note">建议先导入股票库，再检索并加入选股篮。选股篮会同步到更新、回测、寻优与分析。</p>
+      <p class="panel-note">建议先导入股票库，再搜索并加入选股篮。选股篮会同步到更新、回测、寻优与分析。</p>
       <div class="form-grid">
         <div>
           <label class="label">市场</label>
@@ -22,7 +22,7 @@
           <label class="label">关键词</label>
           <input
             :value="query"
-            placeholder="symbol / 公司名 / 关键字"
+            placeholder="symbol / 公司名 / 关键词"
             @input="emit('update:query', $event.target.value)"
             @keyup.enter="search"
           />
@@ -39,10 +39,10 @@
       <div class="toolbar">
         <button class="btn-secondary" @click="search" :disabled="store.symbolsLoading">查询</button>
         <button class="btn-ghost" @click="importSymbols" :disabled="store.symbolsLoading">初始化当前市场</button>
-        <button class="btn-ghost" @click="importAllSymbols" :disabled="store.symbolsLoading">导入全部A股</button>
+        <button class="btn-ghost" @click="importAllSymbols" :disabled="store.symbolsLoading">导入全部 A 股</button>
         <button class="btn-ghost" @click="selectPage" :disabled="store.symbolsLoading">全选当前页</button>
         <button class="btn-ghost" @click="invertPage" :disabled="store.symbolsLoading">反选当前页</button>
-        <span class="muted">{{ store.symbolsLoading ? '加载中…' : ' ' }}</span>
+        <span class="muted">{{ store.symbolsLoading ? '加载中...' : ' ' }}</span>
         <span v-if="selectedSymbols.length" class="muted">已选 {{ selectedSymbols.length }} 只</span>
       </div>
       <p v-if="store.symbolsError" class="error">{{ store.symbolsError }}</p>
@@ -99,6 +99,18 @@
           <button class="btn-secondary" @click="loadPortfolio" :disabled="!selectedPortfolio">加载</button>
           <button class="btn-secondary" @click="deletePortfolio" :disabled="!selectedPortfolio">删除</button>
         </div>
+        <div v-if="portfolioSaveOpen" class="selection-load">
+          <input
+            :value="portfolioDraftName"
+            class="select"
+            placeholder="输入组合名称"
+            @input="updatePortfolioDraftName"
+            @keyup.enter="confirmSaveSelection"
+          />
+          <button class="btn-secondary" @click="confirmSaveSelection">确认保存</button>
+          <button class="btn-ghost" @click="cancelSaveSelection">取消</button>
+        </div>
+        <p v-if="portfolioSaveError" class="error">{{ portfolioSaveError }}</p>
         <div class="selection-chips">
           <button v-for="symbol in selectedSymbols" :key="symbol" class="chip" @click="removeSymbol(symbol)">
             {{ formatSelectedSymbol(symbol) }}
@@ -136,11 +148,11 @@
       <header class="panel-title">
         <div>
           <h2>数据更新</h2>
-          <p class="muted">批量更新市场数据缓存，建议先执行。</p>
+          <p class="muted">批量更新市场数据缓存，建议优先执行。</p>
         </div>
         <span class="pill">Update</span>
       </header>
-      <p class="panel-note">更新会将K线写入PG；建议回溯至少 1 年。选股篮为空时将全量更新当前市场。</p>
+      <p class="panel-note">更新会将 K 线写入 PG；建议回溯至少 1 年。选股篮为空时将全量更新当前市场。</p>
       <div class="form-grid">
         <div>
           <label class="label">回溯年数</label>
@@ -208,7 +220,8 @@ const emit = defineEmits([
   'update:query',
   'update:kind',
   'update:pageSize',
-  'update:selectedPortfolio'
+  'update:selectedPortfolio',
+  'update:portfolioDraftName'
 ])
 
 defineProps({
@@ -221,6 +234,9 @@ defineProps({
   selectedSymbols: Array,
   savedPortfolios: Array,
   selectedPortfolio: String,
+  portfolioDraftName: String,
+  portfolioSaveOpen: Boolean,
+  portfolioSaveError: String,
   updateForm: Object,
   lastUpdateSummary: Object,
   totalPages: Number,
@@ -239,6 +255,8 @@ defineProps({
   isSelected: Function,
   clearSymbols: Function,
   saveSelection: Function,
+  confirmSaveSelection: Function,
+  cancelSaveSelection: Function,
   loadPortfolio: Function,
   deletePortfolio: Function,
   removeSymbol: Function,
@@ -246,4 +264,8 @@ defineProps({
   applyPageSize: Function,
   runKlUpdate: Function
 })
+
+const updatePortfolioDraftName = (event) => {
+  emit('update:portfolioDraftName', event.target.value)
+}
 </script>

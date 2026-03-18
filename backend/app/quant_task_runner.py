@@ -2,6 +2,7 @@
 from .database import SessionLocal
 from .quant_analysis_service import _run_analysis_job
 from .quant_ml_pipeline import run_ml_feature_job, run_ml_predict_job, run_ml_train_job
+from .quant_ml_stock_select import run_ml_stock_select_job
 import json
 from datetime import datetime
 
@@ -12,7 +13,9 @@ def _run_job(job_id: int):
         job = crud.get_quant_job(db, job_id)
         if not job:
             return
-        crud.set_quant_job_running(db, job)
+        job = crud.set_quant_job_running(db, job)
+        if not job:
+            return
 
         if job.type == "kl_update":
             market = (job.params.get("market") or "CN").upper()
@@ -64,7 +67,7 @@ def _run_job(job_id: int):
             from abupy import abu
 
             market = (job.params.get("market") or "CN").upper()
-            symbols = _normalize_symbols(job.params.get("symbols"), market)
+            symbols = _normalize_symbols(job.params.get("symbols"), market, fallback_default=False)
             if not symbols:
                 raise RuntimeError("No symbols specified for backtest.")
             missing_symbols = _ensure_symbols_klines(
@@ -101,7 +104,7 @@ def _run_job(job_id: int):
                     read_cash=job.params.get("cash", 1000000),
                     buy_factors=buy_factors,
                     sell_factors=sell_factors,
-                    choice_symbols=symbols,
+                    choice_symbols=available_symbols,
                     n_folds=job.params.get("n_folds", 1),
                     start=job.params.get("start"),
                     end=job.params.get("end"),
@@ -244,7 +247,7 @@ def _run_job(job_id: int):
             from abupy import abu
 
             market = (job.params.get("market") or "CN").upper()
-            symbols = _normalize_symbols(job.params.get("symbols"), market)
+            symbols = _normalize_symbols(job.params.get("symbols"), market, fallback_default=False)
             cash = job.params.get("cash", 1000000)
             n_folds = job.params.get("n_folds", 1)
             start = job.params.get("start")
@@ -549,7 +552,7 @@ def _run_job(job_id: int):
             _validate_strategy_list([buy_strategy], "buy")
             _validate_strategy_list([sell_strategy], "sell")
 
-            requested_symbols = _normalize_symbols(job.params.get("symbols"), market)
+            requested_symbols = _normalize_symbols(job.params.get("symbols"), market, fallback_default=False)
             all_symbols_raw = job.params.get("all_symbols", False)
             if isinstance(all_symbols_raw, str):
                 all_symbols = all_symbols_raw.strip().lower() in {"1", "true", "yes", "y"}
@@ -679,6 +682,11 @@ def _run_job(job_id: int):
 
         if job.type == "ml_predict":
             result = run_ml_predict_job(job.params or {}, db)
+            crud.set_quant_job_result(db, job, result)
+            return
+
+        if job.type == "ml_stock_select":
+            result = run_ml_stock_select_job(job.params or {}, db, job_id=job.id)
             crud.set_quant_job_result(db, job, result)
             return
 

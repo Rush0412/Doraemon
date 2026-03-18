@@ -498,6 +498,11 @@ select:focus {
   color: #8c3030;
 }
 
+.status-cancelled {
+  background: #e5e7eb;
+  color: #4b5563;
+}
+
 .pill {
   padding: 6px 12px;
   border-radius: 999px;

@@ -47,3 +47,7 @@ def start_ml_train(payload: dict, db: Session = Depends(get_db)):
 
 def start_ml_predict(payload: dict, db: Session = Depends(get_db)):
     return _enqueue_job("ml_predict", payload, db)
+
+
+def start_ml_stock_select(payload: dict, db: Session = Depends(get_db)):
+    return _enqueue_job("ml_stock_select", payload, db)

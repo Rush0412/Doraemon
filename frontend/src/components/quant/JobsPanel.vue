@@ -5,15 +5,19 @@
         <h2>任务队列</h2>
         <p class="muted">回测、更新与分析任务统一管理。</p>
       </div>
+      <div class="table-actions">
+        <button class="btn-secondary" @click="batchDeleteFinished">批量删除已完成</button>
+        <button class="btn-secondary" @click="batchDeleteFailed">批量删除失败</button>
+      </div>
       <div v-if="store.activeJob" class="pill">
-        当前任务 #{{ store.activeJob.id }} · {{ store.activeJob.type }} ·
+        当前任务 #{{ store.activeJob.id }} / {{ store.activeJob.type }} /
         <span :class="['status', `status-${store.activeJob.status}`]">{{ store.activeJob.status }}</span>
       </div>
     </header>
     <p class="panel-note">成功任务可导出 JSON/CSV，用于后续复盘或策略记录。</p>
 
     <p v-if="store.jobsError" class="error">{{ store.jobsError }}</p>
-    <div v-if="store.jobsLoading" class="muted">加载中…</div>
+    <div v-if="store.jobsLoading" class="muted">加载中...</div>
     <div v-else class="table-wrap">
       <table class="table">
         <thead>
@@ -39,7 +43,13 @@
             <td class="mono">{{ brief(job.error) }}</td>
             <td>
               <div class="table-actions">
-                <a v-if="job.status === 'succeeded'" class="btn-ghost" :href="exportUrl(job.id, 'json')" target="_blank" rel="noreferrer">
+                <a
+                  v-if="job.status === 'succeeded'"
+                  class="btn-ghost"
+                  :href="exportUrl(job.id, 'json')"
+                  target="_blank"
+                  rel="noreferrer"
+                >
                   导出 JSON
                 </a>
                 <a v-if="job.status === 'succeeded' && job.result?.orders" class="btn-ghost" :href="exportUrl(job.id, 'csv', 'orders')">
@@ -49,7 +59,9 @@
                   行为 CSV
                 </a>
                 <button class="btn-secondary" @click="selectJob(job.id)">详情</button>
-                <button class="btn-secondary" @click="removeJob(job)" :disabled="job.status === 'running'">删除</button>
+                <button class="btn-secondary" @click="removeJob(job)">
+                  {{ job.status === 'running' ? '强制移除' : '删除' }}
+                </button>
               </div>
             </td>
           </tr>
@@ -105,6 +117,8 @@ defineProps({
   exportUrl: Function,
   selectJob: Function,
   removeJob: Function,
+  batchDeleteFinished: Function,
+  batchDeleteFailed: Function,
   activeParamsText: String,
   activeResultText: String,
   activeErrorText: String

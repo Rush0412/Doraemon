@@ -328,12 +328,13 @@ def _evaluate_symbols_for_run(
     end,
     top_n: int = 10,
     eval_limit: int = 120,
+    progress_cb=None,
 ) -> dict:
     eval_limit = max(5, min(int(eval_limit), 500))
     top_n = max(1, min(int(top_n), 50))
     candidates = symbols[:eval_limit]
     rows = []
-    for symbol in candidates:
+    for idx, symbol in enumerate(candidates, start=1):
         try:
             abu_result, _ = abu.run_loop_back(
                 read_cash=cash,
@@ -364,6 +365,12 @@ def _evaluate_symbols_for_run(
             rows.append(row)
         except Exception:
             continue
+        finally:
+            if callable(progress_cb) and (idx == len(candidates) or idx % 5 == 0):
+                try:
+                    progress_cb(idx, len(candidates))
+                except Exception:
+                    pass
 
     rows_sorted = sorted(
         rows,

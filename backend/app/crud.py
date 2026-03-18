@@ -1,10 +1,10 @@
-from typing import Optional
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Optional, Union
 
 from sqlalchemy.orm import Session
 from sqlalchemy import select, or_, and_, func, not_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from datetime import date
-
 from . import models, schemas
 
 
@@ -27,12 +27,51 @@ def _market_filter(model, markets: Optional[list[str]]):
     return pred
 
 
+def _ml_market_scope(market: Optional[str]) -> list[str]:
+    key = str(market or "CN").upper()
+    if key in {"CN", "ALL", "A"}:
+        return ["SH", "SZ", "300"]
+    return [key]
+
+
+def _json_safe_value(value):
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_value(item) for item in value]
+    if hasattr(value, "item") and callable(getattr(value, "item")):
+        try:
+            return _json_safe_value(value.item())
+        except Exception:
+            pass
+    if hasattr(value, "isoformat") and callable(getattr(value, "isoformat")):
+        try:
+            return value.isoformat()
+        except Exception:
+            pass
+    return str(value)
+
+
 def create_quant_job(db: Session, payload: schemas.QuantJobCreate) -> models.QuantJob:
     job = models.QuantJob(type=payload.type, params=payload.params, status="queued")
     db.add(job)
     db.commit()
     db.refresh(job)
     return job
+
+
+def _quant_job_id(job: Union[models.QuantJob, int]) -> int:
+    return int(job.id if hasattr(job, "id") else job)
+
+
+def _current_quant_job(db: Session, job: Union[models.QuantJob, int]) -> Optional[models.QuantJob]:
+    return db.get(models.QuantJob, _quant_job_id(job))
 
 
 def get_quant_job(db: Session, job_id: int) -> Optional[models.QuantJob]:
@@ -44,35 +83,86 @@ def list_quant_jobs(db: Session, limit: int = 50) -> list[models.QuantJob]:
     return result.scalars().all()
 
 
-def set_quant_job_running(db: Session, job: models.QuantJob) -> models.QuantJob:
-    job.status = "running"
-    db.add(job)
+def set_quant_job_running(db: Session, job: Union[models.QuantJob, int]) -> Optional[models.QuantJob]:
+    current = _current_quant_job(db, job)
+    if not current or current.status not in {"queued", "running"}:
+        return current
+    current.status = "running"
+    db.add(current)
     db.commit()
-    db.refresh(job)
-    return job
+    db.refresh(current)
+    return current
 
 
-def set_quant_job_result(db: Session, job: models.QuantJob, result: dict) -> models.QuantJob:
-    job.status = "succeeded"
-    job.result = result
-    job.error = None
-    db.add(job)
+def set_quant_job_result(db: Session, job: Union[models.QuantJob, int], result: dict) -> Optional[models.QuantJob]:
+    current = _current_quant_job(db, job)
+    if not current or current.status in {"failed", "cancelled"}:
+        return current
+    current.status = "succeeded"
+    current.result = _json_safe_value(result)
+    current.error = None
+    db.add(current)
     db.commit()
-    db.refresh(job)
-    return job
+    db.refresh(current)
+    return current
 
 
-def set_quant_job_error(db: Session, job: models.QuantJob, error: str) -> models.QuantJob:
-    job.status = "failed"
-    job.error = error
-    db.add(job)
+def touch_quant_job(
+    db: Session,
+    job: Union[models.QuantJob, int],
+    *,
+    status: Optional[str] = None,
+) -> Optional[models.QuantJob]:
+    current = _current_quant_job(db, job)
+    if not current or current.status in {"failed", "cancelled", "succeeded"}:
+        return current
+    if status:
+        current.status = status
+    current.updated_at = datetime.now(timezone.utc)
+    db.add(current)
     db.commit()
-    db.refresh(job)
-    return job
+    db.refresh(current)
+    return current
 
 
-def delete_quant_job(db: Session, job: models.QuantJob) -> None:
-    db.delete(job)
+def set_quant_job_error(
+    db: Session,
+    job: Union[models.QuantJob, int],
+    error: str,
+    *,
+    overwrite_terminal: bool = False,
+    terminal_status: str = "failed",
+) -> Optional[models.QuantJob]:
+    current = _current_quant_job(db, job)
+    if not current:
+        return None
+    if not overwrite_terminal and current.status in {"succeeded", "failed", "cancelled"}:
+        return current
+    current.status = terminal_status
+    current.error = error
+    if terminal_status != "succeeded":
+        current.result = None
+    db.add(current)
+    db.commit()
+    db.refresh(current)
+    return current
+
+
+def cancel_quant_job(db: Session, job: Union[models.QuantJob, int], error: str = "Job cancelled") -> Optional[models.QuantJob]:
+    return set_quant_job_error(
+        db,
+        job,
+        error,
+        overwrite_terminal=False,
+        terminal_status="cancelled",
+    )
+
+
+def delete_quant_job(db: Session, job: Union[models.QuantJob, int]) -> None:
+    current = _current_quant_job(db, job)
+    if not current:
+        return
+    db.delete(current)
     db.commit()
 
 
@@ -253,6 +343,36 @@ def list_stock_symbols_by_markets(db: Session, markets: list[str]) -> list[model
     return result.scalars().all()
 
 
+def list_kline_symbols_by_markets(
+    db: Session,
+    markets: list[str],
+    *,
+    min_rows: int = 120,
+    limit: int = 300,
+) -> list[str]:
+    market_pred = _market_filter(models.StockKline, markets)
+    if market_pred is None:
+        return []
+    stmt = (
+        select(
+            models.StockKline.symbol,
+            func.count(models.StockKline.id).label("row_count"),
+            func.max(models.StockKline.trade_date).label("latest_trade_date"),
+        )
+        .where(market_pred)
+        .group_by(models.StockKline.symbol)
+        .having(func.count(models.StockKline.id) >= max(1, int(min_rows)))
+        .order_by(
+            func.max(models.StockKline.trade_date).desc(),
+            func.count(models.StockKline.id).desc(),
+            models.StockKline.symbol.asc(),
+        )
+        .limit(max(1, int(limit)))
+    )
+    result = db.execute(stmt)
+    return [str(row.symbol).strip() for row in result.all() if str(row.symbol or "").strip()]
+
+
 def has_stock_symbols(db: Session, market: str) -> bool:
     stmt = select(models.StockSymbol.id).where(models.StockSymbol.market == market).limit(1)
     result = db.execute(stmt).scalar_one_or_none()
@@ -351,13 +471,14 @@ def list_ml_feature_snapshots(
     symbols: Optional[list[str]] = None,
     limit: int = 200000,
 ) -> list[models.MLFeatureSnapshot]:
+    markets = _ml_market_scope(market)
     stmt = select(models.MLFeatureSnapshot).where(
-        models.MLFeatureSnapshot.market == market,
+        models.MLFeatureSnapshot.market.in_(markets),
         models.MLFeatureSnapshot.feature_version == feature_version,
     )
     if symbols:
         stmt = stmt.where(models.MLFeatureSnapshot.symbol.in_(symbols))
-    stmt = stmt.order_by(models.MLFeatureSnapshot.trade_date.asc()).limit(max(1, limit))
+    stmt = stmt.order_by(models.MLFeatureSnapshot.trade_date.desc()).limit(max(1, limit))
     result = db.execute(stmt)
     return result.scalars().all()
 
@@ -369,8 +490,9 @@ def list_latest_ml_feature_snapshots(
     symbols: Optional[list[str]] = None,
     limit: int = 500,
 ) -> list[models.MLFeatureSnapshot]:
+    markets = _ml_market_scope(market)
     base_filters = [
-        models.MLFeatureSnapshot.market == market,
+        models.MLFeatureSnapshot.market.in_(markets),
         models.MLFeatureSnapshot.feature_version == feature_version,
     ]
     if symbols:
@@ -490,7 +612,8 @@ def list_latest_ml_predictions(
     model_id: Optional[int] = None,
     limit: int = 100,
 ) -> list[models.MLPrediction]:
-    stmt = select(models.MLPrediction).where(models.MLPrediction.market == market)
+    markets = _ml_market_scope(market)
+    stmt = select(models.MLPrediction).where(models.MLPrediction.market.in_(markets))
     if model_id:
         stmt = stmt.where(models.MLPrediction.model_id == model_id)
     stmt = stmt.order_by(models.MLPrediction.trade_date.desc(), models.MLPrediction.score_up_5d.desc()).limit(max(1, limit))

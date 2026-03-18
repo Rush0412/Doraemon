@@ -11,6 +11,11 @@ from sqlalchemy.orm import Session
 
 from . import crud
 from .quant_base import _market_scope, _normalize_symbols
+from .quant_ml_model_utils import (
+    recommended_market_model_min_symbol_count,
+    resolve_best_ml_model,
+    score_latest_features_for_model,
+)
 
 
 def _repo_root() -> Path:
@@ -158,15 +163,22 @@ def run_ml_feature_job(job_params: dict, db: Session) -> dict:
     start = job_params.get("start")
     end = job_params.get("end")
     min_rows = int(job_params.get("min_rows", 120))
-    symbol_limit = max(10, min(int(job_params.get("symbol_limit", 300)), 2000))
+    symbol_limit = max(10, min(int(job_params.get("symbol_limit", 300)), 10000))
 
     raw_symbols = job_params.get("symbols")
     symbols = _normalize_symbols(raw_symbols, market)
     if not raw_symbols:
         markets = _market_scope(market)
-        symbols = [
-            item.symbol for item in crud.list_stock_symbols_by_markets(db, markets)[:symbol_limit]
-        ]
+        symbols = crud.list_kline_symbols_by_markets(
+            db,
+            markets,
+            min_rows=min_rows,
+            limit=symbol_limit,
+        )
+        if not symbols:
+            symbols = [
+                item.symbol for item in crud.list_stock_symbols_by_markets(db, markets)[:symbol_limit]
+            ]
     symbols = list(dict.fromkeys([str(s).strip() for s in symbols if str(s).strip()]))
     if not symbols:
         raise RuntimeError("No symbols available for ml_feature")
@@ -247,13 +259,13 @@ def run_ml_train_job(job_params: dict, db: Session) -> dict:
     train_ratio = float(job_params.get("train_ratio", 0.8))
     train_ratio = min(max(train_ratio, 0.6), 0.95)
     max_samples = max(1000, min(int(job_params.get("max_samples", 300000)), 1_000_000))
-    symbols = _normalize_symbols(job_params.get("symbols"), market) if job_params.get("symbols") else None
+    requested_symbols = _normalize_symbols(job_params.get("symbols"), market) if job_params.get("symbols") else None
 
     feature_rows = crud.list_ml_feature_snapshots(
         db,
         market=market,
         feature_version=feature_version,
-        symbols=symbols,
+        symbols=requested_symbols,
         limit=max_samples,
     )
     if not feature_rows:
@@ -300,6 +312,9 @@ def run_ml_train_job(job_params: dict, db: Session) -> dict:
         "pos_rate_train": float(train_df[target].mean()),
         "pos_rate_val": float(val_df[target].mean()),
         "accuracy": float(accuracy_score(y_val, val_pred)),
+        "symbol_count": int(frame["symbol"].nunique()),
+        "train_symbol_count": int(train_df["symbol"].nunique()),
+        "val_symbol_count": int(val_df["symbol"].nunique()),
     }
     if len(np.unique(y_val)) > 1:
         metrics["auc"] = float(roc_auc_score(y_val, val_prob))
@@ -309,7 +324,13 @@ def run_ml_train_job(job_params: dict, db: Session) -> dict:
         metrics["log_loss"] = None
 
     now_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_name = str(job_params.get("model_name") or f"hgb_{market}_{target}_{feature_version}")
+    model_scope = "custom" if requested_symbols else "market"
+    if job_params.get("model_name"):
+        model_name = str(job_params.get("model_name"))
+    elif model_scope == "market":
+        model_name = f"market_hgb_{market}_{target}_{feature_version}"
+    else:
+        model_name = f"custom_hgb_{market}_{target}_{feature_version}"
     artifact_path = _model_store_dir() / f"{model_name}_{now_tag}.pkl"
 
     payload = {
@@ -322,7 +343,13 @@ def run_ml_train_job(job_params: dict, db: Session) -> dict:
         "train_end": train_df["trade_date"].max(),
         "val_start": val_df["trade_date"].min(),
         "val_end": val_df["trade_date"].max(),
-        "params": model_params,
+        "params": {
+            **model_params,
+            "training_scope": model_scope,
+            "training_symbol_count": int(frame["symbol"].nunique()),
+            "training_markets": sorted({str(item).upper() for item in frame["market"].dropna().tolist()}),
+            "requested_symbols": requested_symbols or [],
+        },
         "metrics": metrics,
         "artifact_path": str(artifact_path),
         "status": "trained",
@@ -338,6 +365,8 @@ def run_ml_train_job(job_params: dict, db: Session) -> dict:
         "feature_version": feature_version,
         "feature_cols": feature_cols,
         "metrics": metrics,
+        "training_scope": model_scope,
+        "training_symbol_count": int(frame["symbol"].nunique()),
         "trained_at": datetime.now().isoformat(),
         "estimator": clf,
     }
@@ -357,101 +386,40 @@ def run_ml_train_job(job_params: dict, db: Session) -> dict:
         "market": market,
         "target": target,
         "feature_version": feature_version,
+        "training_scope": model_scope,
+        "training_symbol_count": int(frame["symbol"].nunique()),
         "metrics": metrics,
         "artifact_path": str(artifact_path),
         "auto_promoted": auto_promoted,
     }
 
-
-def _score_to_action(score: float):
-    if score >= 0.7:
-        return "buy", 0.30, 0.50
-    if score >= 0.55:
-        return "light_buy", 0.10, 0.20
-    if score <= 0.45:
-        return "avoid", 0.00, 0.05
-    return "hold", 0.05, 0.10
-
-
 def run_ml_predict_job(job_params: dict, db: Session) -> dict:
     market = (job_params.get("market") or "CN").upper()
     target = str(job_params.get("target") or "y_up_5d")
     limit = max(1, min(int(job_params.get("limit", 50)), 500))
-    symbols = _normalize_symbols(job_params.get("symbols"), market) if job_params.get("symbols") else None
-
-    model_id = job_params.get("model_id")
-    model_row = crud.get_ml_model(db, int(model_id)) if model_id else None
-    if model_row is None:
-        model_row = crud.get_active_ml_model(db, market=market, target=target)
-    if model_row is None:
-        raise RuntimeError("No active model found. Train and promote a model first.")
-    if not model_row.artifact_path:
-        raise RuntimeError("Model artifact path is empty.")
-
-    artifact_path = Path(model_row.artifact_path)
-    if not artifact_path.exists():
-        raise RuntimeError(f"Model artifact not found: {artifact_path}")
-    with open(artifact_path, "rb") as f:
-        artifact = pickle.load(f)
-
-    feature_version = str(artifact.get("feature_version") or model_row.feature_version or "v1")
-    feature_cols = artifact.get("feature_cols") or []
-    estimator = artifact.get("estimator")
-    if estimator is None or not feature_cols:
-        raise RuntimeError("Model artifact is invalid.")
-
-    latest_rows = crud.list_latest_ml_feature_snapshots(
+    market_wide_mode = not job_params.get("symbols")
+    model_row = resolve_best_ml_model(
         db,
         market=market,
-        feature_version=feature_version,
-        symbols=symbols,
-        limit=max(limit * 4, 200),
+        target=target,
+        model_id=job_params.get("model_id"),
+        require_market_scope=market_wide_mode,
+        min_symbol_count=(
+            recommended_market_model_min_symbol_count(db, market)
+            if market_wide_mode
+            else 0
+        ),
+        allow_fallback_to_best=market_wide_mode,
     )
-    if not latest_rows:
-        raise RuntimeError("No latest feature snapshots found. Run ml_feature first.")
-
-    score_rows = []
-    prediction_rows = []
-    for item in latest_rows:
-        feats = item.features or {}
-        x = np.array([[float(feats.get(col, 0.0) or 0.0) for col in feature_cols]], dtype=float)
-        prob = float(estimator.predict_proba(x)[0, 1])
-        action, pos_min, pos_max = _score_to_action(prob)
-        expected_ret = float((prob - 0.5) * 0.12)
-        vol_20 = _safe_float_or_none(feats.get("vol_20")) or 0.0
-        risk_mdd = float(-abs(vol_20) * 2.0)
-        prediction_rows.append(
-            {
-                "model_id": model_row.id,
-                "market": item.market,
-                "symbol": item.symbol,
-                "trade_date": item.trade_date,
-                "score_up_5d": prob,
-                "expected_ret_5d": expected_ret,
-                "risk_mdd_10d": risk_mdd,
-                "action": action,
-                "position_min": pos_min,
-                "position_max": pos_max,
-                "meta": {
-                    "feature_version": feature_version,
-                    "target": target,
-                },
-            }
-        )
-        score_rows.append(
-            {
-                "symbol": item.symbol,
-                "trade_date": item.trade_date.isoformat() if item.trade_date else None,
-                "score_up_5d": prob,
-                "expected_ret_5d": expected_ret,
-                "risk_mdd_10d": risk_mdd,
-                "action": action,
-                "position_range": [pos_min, pos_max],
-            }
-        )
-
-    upserted = crud.upsert_ml_predictions(db, prediction_rows)
-    score_rows = sorted(score_rows, key=lambda r: r.get("score_up_5d", 0.0), reverse=True)[:limit]
+    scoring = score_latest_features_for_model(
+        db,
+        model_row=model_row,
+        market=market,
+        target=target,
+        symbols=job_params.get("symbols"),
+        limit=max(limit * 4, 200),
+        persist=True,
+    )
 
     return {
         "message": "ml_predict finished",
@@ -459,8 +427,8 @@ def run_ml_predict_job(job_params: dict, db: Session) -> dict:
         "model_name": model_row.name,
         "market": market,
         "target": target,
-        "feature_version": feature_version,
-        "rows_scored": len(prediction_rows),
-        "rows_upserted": int(upserted),
-        "top_predictions": score_rows,
+        "feature_version": scoring["feature_version"],
+        "rows_scored": scoring["rows_scored"],
+        "rows_upserted": scoring["rows_upserted"],
+        "top_predictions": scoring["top_predictions"][:limit],
     }

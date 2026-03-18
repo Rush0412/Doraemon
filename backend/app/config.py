@@ -9,6 +9,7 @@ class Settings(BaseSettings):
         "postgresql://postgres:123456@localhost:5432/doraemon"
     )
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    auto_create_tables: bool = True
 
     class Config:
         env_file = ".env"

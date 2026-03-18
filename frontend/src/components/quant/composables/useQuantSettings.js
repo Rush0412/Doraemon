@@ -27,7 +27,9 @@ export const useQuantSettings = ({
   gridBuyParamLists,
   gridSellParamLists,
   gridUseBacktestBase,
-  gridExploreAllStrategies
+  gridExploreAllStrategies,
+  adviceProfile,
+  adviceTemplates
 }) => {
   const settingsReady = ref(false)
   let settingsSaveTimer = null
@@ -51,7 +53,9 @@ export const useQuantSettings = ({
       gridBuyParamLists: plainObject(gridBuyParamLists),
       gridSellParamLists: plainObject(gridSellParamLists),
       gridUseBacktestBase: !!gridUseBacktestBase.value,
-      gridExploreAllStrategies: !!gridExploreAllStrategies.value
+      gridExploreAllStrategies: !!gridExploreAllStrategies.value,
+      adviceProfile: adviceProfile?.value,
+      adviceTemplates: plainObject(adviceTemplates?.value || {})
     }
     try {
       localStorage.setItem(SETTINGS_KEY, JSON.stringify(snapshot))
@@ -115,6 +119,12 @@ export const useQuantSettings = ({
       }
       if (snapshot.gridExploreAllStrategies !== undefined) {
         gridExploreAllStrategies.value = !!snapshot.gridExploreAllStrategies
+      }
+      if (typeof snapshot.adviceProfile === 'string' && snapshot.adviceProfile.trim() && adviceProfile) {
+        adviceProfile.value = snapshot.adviceProfile
+      }
+      if (snapshot.adviceTemplates && typeof snapshot.adviceTemplates === 'object' && adviceTemplates?.value) {
+        Object.assign(adviceTemplates.value, snapshot.adviceTemplates)
       }
       await nextTick()
       if (snapshot.buyStrategyParams && typeof snapshot.buyStrategyParams === 'object') {
