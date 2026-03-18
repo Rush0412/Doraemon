@@ -42,9 +42,29 @@ def _sort_prediction_dicts(rows: list[dict]) -> list[dict]:
     )
 
 
-def _effective_quant_eval_limit(symbol_top_n: int, symbol_eval_limit: int, candidate_limit: int) -> int:
-    baseline = max(20, symbol_top_n * 2)
-    return max(10, min(int(symbol_eval_limit), int(candidate_limit), baseline))
+def _is_index_symbol(symbol: str) -> bool:
+    lower = str(symbol or "").strip().lower()
+    if not lower:
+        return False
+    return lower.startswith("sh000") or lower.startswith("sz399")
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _effective_quant_eval_limit(*, symbol_eval_limit: int, candidate_count: int, full_market_scan: bool) -> int:
+    if candidate_count <= 0:
+        return 0
+    if full_market_scan:
+        if int(symbol_eval_limit or 0) <= 0:
+            return int(candidate_count)
+        return max(10, min(int(symbol_eval_limit), int(candidate_count)))
+    return max(10, min(int(symbol_eval_limit), int(candidate_count)))
 
 
 def _empty_select_result(
@@ -121,18 +141,25 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
         model_id=job_params.get("model_id"),
         require_market_scope=market_wide_mode,
         min_symbol_count=min_market_model_symbols,
-        allow_fallback_to_best=market_wide_mode,
+        allow_fallback_to_best=bool(market_wide_mode and not requested_model_id),
+        attempt_repair=True,
     )
 
+    full_market_scan = _as_bool(job_params.get("full_market_scan"), default=market_wide_mode)
+    include_indices = _as_bool(job_params.get("include_indices"), default=False)
     allowed_actions = _normalize_action_set(job_params.get("allowed_actions"))
     min_score = max(0.0, min(float(job_params.get("min_score", 0.55)), 1.0))
     min_expected_ret = job_params.get("min_expected_ret_5d")
     min_expected_ret = None if min_expected_ret is None else float(min_expected_ret)
-    prediction_limit = max(20, min(int(job_params.get("prediction_limit", 300)), 2000))
-    candidate_limit = max(10, min(int(job_params.get("candidate_limit", 120)), 1000))
+    max_limit_cap = 50000
+    prediction_limit = max(20, min(int(job_params.get("prediction_limit", 300)), max_limit_cap))
+    candidate_limit = max(10, min(int(job_params.get("candidate_limit", 120)), max_limit_cap))
     symbol_top_n = max(1, min(int(job_params.get("symbol_top_n", 20)), 100))
-    symbol_eval_limit = max(10, min(int(job_params.get("symbol_eval_limit", candidate_limit)), 1000))
-    effective_eval_limit = _effective_quant_eval_limit(symbol_top_n, symbol_eval_limit, candidate_limit)
+    symbol_eval_limit = max(10, min(int(job_params.get("symbol_eval_limit", candidate_limit)), max_limit_cap))
+    if market_wide_mode and full_market_scan:
+        prediction_limit = min(max_limit_cap, max(prediction_limit, universe_count, 2000))
+        candidate_limit = min(max_limit_cap, max(candidate_limit, universe_count, 2000))
+        symbol_eval_limit = min(max_limit_cap, max(symbol_eval_limit, candidate_limit))
     cash = job_params.get("cash", 1000000)
     n_folds = job_params.get("n_folds", 1)
     start = job_params.get("start")
@@ -148,14 +175,19 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
         from .quant_base import _normalize_symbols
 
         requested_symbols = set(_normalize_symbols(raw_symbols, market, fallback_default=False))
+    if requested_symbols:
+        full_market_scan = False
 
+    scoring_limit = max(prediction_limit, candidate_limit, symbol_eval_limit)
+    if market_wide_mode and full_market_scan:
+        scoring_limit = max(scoring_limit, universe_count)
     scoring = score_latest_features_for_model(
         db,
         model_row=model_row,
         market=market,
         target=target,
         symbols=raw_symbols,
-        limit=max(prediction_limit, candidate_limit, symbol_eval_limit),
+        limit=scoring_limit,
         persist=True,
     )
     prediction_dicts = _sort_prediction_dicts(scoring["predictions"])
@@ -166,6 +198,8 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
     for item in prediction_dicts:
         symbol = str(item.get("symbol") or "").strip()
         if requested_symbols and symbol not in requested_symbols:
+            continue
+        if not include_indices and _is_index_symbol(symbol):
             continue
         action = str(item.get("action") or "").strip().lower()
         score = float(item.get("score_up_5d") or 0.0)
@@ -187,6 +221,8 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
             symbol = str(item.get("symbol") or "").strip()
             if requested_symbols and symbol not in requested_symbols:
                 continue
+            if not include_indices and _is_index_symbol(symbol):
+                continue
             action = str(item.get("action") or "").strip().lower()
             if allowed_actions and action not in allowed_actions:
                 continue
@@ -195,13 +231,24 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
                 continue
             filtered_predictions.append(dict(item))
 
-    ml_candidates = _sort_prediction_dicts(filtered_predictions)[:candidate_limit]
+    sorted_predictions = _sort_prediction_dicts(filtered_predictions)
+    if market_wide_mode and full_market_scan:
+        ml_candidates = sorted_predictions
+    else:
+        ml_candidates = sorted_predictions[:candidate_limit]
+    effective_eval_limit = _effective_quant_eval_limit(
+        symbol_eval_limit=symbol_eval_limit,
+        candidate_count=len(ml_candidates),
+        full_market_scan=bool(market_wide_mode and full_market_scan),
+    )
     diagnostics = {
         "allowed_actions": sorted(allowed_actions),
         "min_score": min_score,
         "min_expected_ret_5d": min_expected_ret,
         "prediction_limit": prediction_limit,
         "candidate_limit": candidate_limit,
+        "scoring_limit": scoring_limit,
+        "effective_candidate_count": len(ml_candidates),
         "eval_limit": symbol_eval_limit,
         "effective_eval_limit": effective_eval_limit,
         "min_kline_rows": min_kline_rows,
@@ -216,6 +263,8 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
         "min_market_model_symbols": min_market_model_symbols,
         "market_universe_symbols": universe_count,
         "market_wide_mode": market_wide_mode,
+        "full_market_scan": bool(market_wide_mode and full_market_scan),
+        "include_indices": include_indices,
         "requested_model_id": requested_model_id,
         "selected_model_id": model_row.id,
     }
@@ -328,11 +377,11 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
     for item in actionable_candidates:
         symbol = str(item.get("symbol") or "").strip()
         prediction = prediction_map.get(symbol, {})
-        quant_action = str(item.get("action") or "")
+        quant_action_code = str(item.get("action_code") or "").strip().lower()
         ml_action = str(prediction.get("action") or "").strip().lower()
         if allowed_actions and ml_action not in allowed_actions:
             continue
-        if quant_action in {"观望", "减仓防守"}:
+        if quant_action_code not in {"breakout_buy", "pullback_buy"}:
             continue
         combined = dict(item)
         combined["ml_action"] = prediction.get("action")
@@ -346,9 +395,18 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
         )
         combined["combined_score"] = float(item.get("score", 0.0) or 0.0) + float(
             prediction.get("score_up_5d", 0.0) or 0.0
-        ) * 100.0
+        ) * 1000.0
         buy_candidates.append(combined)
-    buy_candidates = sorted(buy_candidates, key=lambda item: float(item.get("combined_score", 0.0)), reverse=True)
+    buy_candidates = sorted(
+        buy_candidates,
+        key=lambda item: (
+            float(item.get("score_up_5d", 0.0) or 0.0),
+            float(item.get("combined_score", 0.0) or 0.0),
+            float(item.get("win_rate", 0.0) or 0.0),
+            float(item.get("profit_sum", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
 
     summary = {
         **summary_metrics,
@@ -365,17 +423,19 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
         "evaluated_symbols": int(symbol_eval.get("evaluated", 0) or 0),
         "buy_candidates": len(buy_candidates),
         "symbol_top_n": len(top_symbols),
+        "full_market_scan": bool(market_wide_mode and full_market_scan),
         "start": start,
         "end": end,
         "n_folds": n_folds,
         "warning": diagnostics.get("model_warning"),
     }
     diagnostics["truncated"] = bool(symbol_eval.get("truncated"))
+    ml_candidates_preview_limit = min(max(candidate_limit, symbol_top_n), 2000)
     return {
         "summary": summary,
         "diagnostics": diagnostics,
         "recommendation": recommendation,
-        "ml_candidates": ml_candidates[:candidate_limit],
+        "ml_candidates": ml_candidates[:ml_candidates_preview_limit],
         "top_symbols": top_symbols,
         "actionable_candidates": actionable_candidates,
         "buy_candidates": buy_candidates[:symbol_top_n],

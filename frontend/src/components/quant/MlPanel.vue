@@ -259,11 +259,11 @@
         </div>
         <div>
           <label class="label">预测池大小</label>
-          <input v-model.number="mlSelectForm.prediction_limit" type="number" min="20" max="2000" />
+          <input v-model.number="mlSelectForm.prediction_limit" type="number" min="20" max="50000" />
         </div>
         <div>
           <label class="label">候选池大小</label>
-          <input v-model.number="mlSelectForm.candidate_limit" type="number" min="10" max="1000" />
+          <input v-model.number="mlSelectForm.candidate_limit" type="number" min="10" max="50000" />
         </div>
         <div>
           <label class="label">输出 TopN</label>
@@ -271,7 +271,7 @@
         </div>
         <div>
           <label class="label">评估上限</label>
-          <input v-model.number="mlSelectForm.symbol_eval_limit" type="number" min="10" max="1000" />
+          <input v-model.number="mlSelectForm.symbol_eval_limit" type="number" min="10" max="50000" />
         </div>
         <div>
           <label class="label">最少 K 线</label>

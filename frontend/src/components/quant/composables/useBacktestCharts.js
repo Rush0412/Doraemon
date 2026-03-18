@@ -22,6 +22,7 @@ export const useBacktestCharts = ({
   chartSymbol,
   selectedOrderKey,
   selectedOrder,
+  predictionSignal,
   showStopLines,
   chartWindow,
   activeTab,
@@ -278,9 +279,95 @@ export const useBacktestCharts = ({
     })
   }
 
+  const buildSignalForChart = () => {
+    const signal = predictionSignal?.value
+    if (!signal || typeof signal !== 'object') return null
+    const signalSymbol = String(signal.symbol || '').trim()
+    if (signalSymbol && chartSymbol.value && !symbolEquals(signalSymbol, chartSymbol.value)) return null
+    return signal
+  }
+
+  const resolveSignalEvent = () => {
+    const signal = buildSignalForChart()
+    if (!signal || !klineData.value.length) return null
+    const entryDateInt = toDateInt(signal.trade_date) || toDateInt(klineData.value[klineData.value.length - 1]?.date)
+    if (!entryDateInt) return null
+    const entryTime = toChartTime(entryDateInt)
+    if (!entryTime) return null
+    const entryRow =
+      klineData.value.find((item) => toDateInt(item.date) === entryDateInt) ||
+      klineData.value.find((item) => {
+        const dateInt = toDateInt(item.date)
+        return dateInt && dateInt >= entryDateInt
+      }) ||
+      klineData.value[klineData.value.length - 1] ||
+      null
+    const rawEntryPrice = Number(signal.entry_price)
+    const entryPrice = Number.isFinite(rawEntryPrice)
+      ? rawEntryPrice
+      : Number(entryRow?.close ?? entryRow?.open ?? NaN)
+    const stopLoss = Number(signal.stop_loss)
+    const takeProfit = Number(signal.take_profit)
+    const hasStopLoss = Number.isFinite(stopLoss) && stopLoss > 0
+    const hasTakeProfit = Number.isFinite(takeProfit) && takeProfit > 0
+    let sellTrigger = null
+    if (hasStopLoss || hasTakeProfit) {
+      for (const item of klineData.value) {
+        const dateInt = toDateInt(item?.date)
+        if (!dateInt || dateInt < entryDateInt) continue
+        const low = Number(item?.low ?? item?.close ?? NaN)
+        const high = Number(item?.high ?? item?.close ?? NaN)
+        const stopHit = hasStopLoss && Number.isFinite(low) && low <= stopLoss
+        const takeHit = hasTakeProfit && Number.isFinite(high) && high >= takeProfit
+        if (!stopHit && !takeHit) continue
+        if (stopHit) {
+          sellTrigger = { type: 'stop_loss', dateInt, time: toChartTime(dateInt), price: stopLoss }
+        } else {
+          sellTrigger = { type: 'take_profit', dateInt, time: toChartTime(dateInt), price: takeProfit }
+        }
+        break
+      }
+    }
+    return {
+      action: String(signal.action || '').trim().toLowerCase() || null,
+      entryDateInt,
+      entryTime,
+      entryPrice: Number.isFinite(entryPrice) ? entryPrice : null,
+      stopLoss: hasStopLoss ? stopLoss : null,
+      takeProfit: hasTakeProfit ? takeProfit : null,
+      sellTrigger
+    }
+  }
+
+  const buildPredictionMarkers = (minDate, maxDate) => {
+    const event = resolveSignalEvent()
+    if (!event) return []
+    const markers = []
+    if (event.entryTime && (!minDate || (event.entryDateInt >= minDate && event.entryDateInt <= maxDate))) {
+      markers.push({
+        time: event.entryTime,
+        position: 'belowBar',
+        color: '#2f6fdd',
+        shape: 'circle',
+        text: `SIG BUY ${formatNumber(event.entryPrice)}`
+      })
+    }
+    const trigger = event.sellTrigger
+    if (trigger?.time && (!minDate || (trigger.dateInt >= minDate && trigger.dateInt <= maxDate))) {
+      const isStop = trigger.type === 'stop_loss'
+      markers.push({
+        time: trigger.time,
+        position: 'aboveBar',
+        color: isStop ? '#b33a3a' : '#1f7a4b',
+        shape: 'arrowDown',
+        text: `${isStop ? 'SIG SL' : 'SIG TP'} ${formatNumber(trigger.price)}`
+      })
+    }
+    return markers
+  }
+
   const buildMarkers = () => {
     const orders = chartOrdersAll.value || []
-    if (!orders.length) return []
     const maxMarkers = 5000
     const markerOrders = orders.length > maxMarkers ? orders.slice(-maxMarkers) : orders
     const minDate = klineData.value.length ? toDateInt(klineData.value[0]?.date) || 0 : 0
@@ -310,7 +397,9 @@ export const useBacktestCharts = ({
         })
       }
     })
-    return markers.sort((a, b) => String(a.time).localeCompare(String(b.time)))
+    return [...markers, ...buildPredictionMarkers(minDate, maxDate)].sort((a, b) =>
+      String(a.time).localeCompare(String(b.time))
+    )
   }
 
   const clearOrderLines = () => {
@@ -330,9 +419,50 @@ export const useBacktestCharts = ({
 
   const applyOrderLines = () => {
     clearOrderLines()
-    if (!candleSeries.value || !selectedOrder.value) return
+    if (!candleSeries.value) return
     const order = selectedOrder.value
     const lines = []
+    if (!order) {
+      const event = resolveSignalEvent()
+      if (event?.entryPrice && Number.isFinite(event.entryPrice)) {
+        lines.push(
+          candleSeries.value.createPriceLine({
+            price: event.entryPrice,
+            color: '#2f6fdd',
+            lineWidth: 2,
+            lineStyle: 0,
+            axisLabelVisible: true,
+            title: 'SIG BUY'
+          })
+        )
+      }
+      if (showStopLines.value && event?.stopLoss) {
+        lines.push(
+          candleSeries.value.createPriceLine({
+            price: event.stopLoss,
+            color: '#b33a3a',
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: 'SIG SL'
+          })
+        )
+      }
+      if (showStopLines.value && event?.takeProfit) {
+        lines.push(
+          candleSeries.value.createPriceLine({
+            price: event.takeProfit,
+            color: '#1f7a4b',
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: 'SIG TP'
+          })
+        )
+      }
+      orderPriceLines.value = lines
+      return
+    }
     const buyPrice = Number(order.buy_price)
     if (Number.isFinite(buyPrice) && buyPrice > 0) {
       lines.push(

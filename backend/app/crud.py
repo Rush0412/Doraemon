@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Optional, Union
 
 from sqlalchemy.orm import Session
-from sqlalchemy import select, or_, and_, func, not_
+from sqlalchemy import select, or_, and_, func, not_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from . import models, schemas
 
@@ -22,8 +22,16 @@ def _market_filter(model, markets: Optional[list[str]]):
     if not markets:
         return None
     pred = model.market.in_(markets)
+    if "300" in markets:
+        pred = and_(
+            pred,
+            or_(
+                model.market != "300",
+                model.symbol.ilike("sz30%"),
+            ),
+        )
     if "300" in markets and "SZ" not in markets:
-        pred = or_(pred, and_(model.market == "SZ", model.symbol.ilike("sz3%")))
+        pred = or_(pred, and_(model.market == "SZ", model.symbol.ilike("sz30%")))
     return pred
 
 
@@ -32,6 +40,15 @@ def _ml_market_scope(market: Optional[str]) -> list[str]:
     if key in {"CN", "ALL", "A"}:
         return ["SH", "SZ", "300"]
     return [key]
+
+
+def _non_index_symbol_pred(model):
+    return not_(
+        or_(
+            model.symbol.ilike("sh000%"),
+            model.symbol.ilike("sz399%"),
+        )
+    )
 
 
 def _json_safe_value(value):
@@ -190,11 +207,11 @@ def search_stock_symbols(
                 prefix_filters.append(
                     and_(
                         models.StockSymbol.symbol.ilike("sz%"),
-                        not_(models.StockSymbol.symbol.ilike("sz3%")),
+                        not_(models.StockSymbol.symbol.ilike("sz30%")),
                     )
                 )
         if "300" in markets:
-            prefix_filters.append(models.StockSymbol.symbol.ilike("sz3%"))
+            prefix_filters.append(models.StockSymbol.symbol.ilike("sz30%"))
         if prefix_filters:
             filters.append(or_(*prefix_filters))
     if query:
@@ -236,7 +253,7 @@ def search_stock_symbols(
                         )
                     )
                 if "300" in markets and "SZ" not in markets:
-                    filters.append(models.StockSymbol.symbol.ilike("sz3%"))
+                    filters.append(models.StockSymbol.symbol.ilike("sz30%"))
     if filters:
         stmt = stmt.where(*filters)
     total_stmt = select(func.count()).select_from(models.StockSymbol)
@@ -273,11 +290,11 @@ def search_stock_symbols_from_klines(
                 prefix_filters.append(
                     and_(
                         models.StockKline.symbol.ilike("sz%"),
-                        not_(models.StockKline.symbol.ilike("sz3%")),
+                        not_(models.StockKline.symbol.ilike("sz30%")),
                     )
                 )
         if "300" in markets:
-            prefix_filters.append(models.StockKline.symbol.ilike("sz3%"))
+            prefix_filters.append(models.StockKline.symbol.ilike("sz30%"))
         if prefix_filters:
             filters.append(or_(*prefix_filters))
     if query:
@@ -310,7 +327,7 @@ def search_stock_symbols_from_klines(
                         )
                     )
                 if "300" in markets and "SZ" not in markets:
-                    filters.append(models.StockKline.symbol.ilike("sz3%"))
+                    filters.append(models.StockKline.symbol.ilike("sz30%"))
     if filters:
         stmt = stmt.where(*filters)
     total_stmt = select(func.count()).select_from(stmt.subquery())
@@ -335,10 +352,25 @@ def list_stock_symbols(db: Session, market: str) -> list[models.StockSymbol]:
     return result.scalars().all()
 
 
-def list_stock_symbols_by_markets(db: Session, markets: list[str]) -> list[models.StockSymbol]:
+def list_stock_symbols_by_markets(
+    db: Session,
+    markets: list[str],
+    *,
+    include_indices: bool = False,
+) -> list[models.StockSymbol]:
     if not markets:
         return []
-    stmt = select(models.StockSymbol).where(models.StockSymbol.market.in_(markets)).order_by(models.StockSymbol.symbol)
+    stmt = select(models.StockSymbol).where(models.StockSymbol.market.in_(markets))
+    if not include_indices:
+        stmt = stmt.where(
+            not_(
+                or_(
+                    models.StockSymbol.symbol.ilike("sh000%"),
+                    models.StockSymbol.symbol.ilike("sz399%"),
+                )
+            )
+        )
+    stmt = stmt.order_by(models.StockSymbol.symbol)
     result = db.execute(stmt)
     return result.scalars().all()
 
@@ -349,17 +381,27 @@ def list_kline_symbols_by_markets(
     *,
     min_rows: int = 120,
     limit: int = 300,
+    include_indices: bool = False,
 ) -> list[str]:
     market_pred = _market_filter(models.StockKline, markets)
     if market_pred is None:
         return []
-    stmt = (
-        select(
-            models.StockKline.symbol,
-            func.count(models.StockKline.id).label("row_count"),
-            func.max(models.StockKline.trade_date).label("latest_trade_date"),
+    stmt = select(
+        models.StockKline.symbol,
+        func.count(models.StockKline.id).label("row_count"),
+        func.max(models.StockKline.trade_date).label("latest_trade_date"),
+    ).where(market_pred)
+    if not include_indices:
+        stmt = stmt.where(
+            not_(
+                or_(
+                    models.StockKline.symbol.ilike("sh000%"),
+                    models.StockKline.symbol.ilike("sz399%"),
+                )
+            )
         )
-        .where(market_pred)
+    stmt = (
+        stmt
         .group_by(models.StockKline.symbol)
         .having(func.count(models.StockKline.id) >= max(1, int(min_rows)))
         .order_by(
@@ -385,6 +427,34 @@ def has_stock_symbols_any(db: Session, markets: list[str]) -> bool:
     stmt = select(models.StockSymbol.id).where(models.StockSymbol.market.in_(markets)).limit(1)
     result = db.execute(stmt).scalar_one_or_none()
     return result is not None
+
+
+def repair_cn_market_mislabels(db: Session) -> dict:
+    # Legacy compatibility repair:
+    # older rules classified all `sz3xxxxx` symbols as market=300,
+    # which accidentally moved Shenzhen index symbols like sz399xxx
+    # into the 300 market. We normalize them back to SZ.
+    repaired = {}
+    table_specs = [
+        ("stock_symbols", models.StockSymbol),
+        ("stock_klines", models.StockKline),
+        ("ml_feature_snapshots", models.MLFeatureSnapshot),
+        ("ml_predictions", models.MLPrediction),
+    ]
+    for name, table in table_specs:
+        stmt = (
+            update(table)
+            .where(
+                table.market == "300",
+                table.symbol.ilike("sz399%"),
+            )
+            .values(market="SZ")
+        )
+        result = db.execute(stmt)
+        repaired[name] = int(result.rowcount or 0)
+    db.commit()
+    repaired["total"] = int(sum(repaired.values()))
+    return repaired
 
 
 def upsert_stock_symbols(db: Session, rows: list[dict]) -> int:
@@ -470,12 +540,15 @@ def list_ml_feature_snapshots(
     feature_version: str = "v1",
     symbols: Optional[list[str]] = None,
     limit: int = 200000,
+    include_indices: bool = False,
 ) -> list[models.MLFeatureSnapshot]:
     markets = _ml_market_scope(market)
     stmt = select(models.MLFeatureSnapshot).where(
         models.MLFeatureSnapshot.market.in_(markets),
         models.MLFeatureSnapshot.feature_version == feature_version,
     )
+    if not include_indices:
+        stmt = stmt.where(_non_index_symbol_pred(models.MLFeatureSnapshot))
     if symbols:
         stmt = stmt.where(models.MLFeatureSnapshot.symbol.in_(symbols))
     stmt = stmt.order_by(models.MLFeatureSnapshot.trade_date.desc()).limit(max(1, limit))
@@ -489,12 +562,15 @@ def list_latest_ml_feature_snapshots(
     feature_version: str = "v1",
     symbols: Optional[list[str]] = None,
     limit: int = 500,
+    include_indices: bool = False,
 ) -> list[models.MLFeatureSnapshot]:
     markets = _ml_market_scope(market)
     base_filters = [
         models.MLFeatureSnapshot.market.in_(markets),
         models.MLFeatureSnapshot.feature_version == feature_version,
     ]
+    if not include_indices:
+        base_filters.append(_non_index_symbol_pred(models.MLFeatureSnapshot))
     if symbols:
         base_filters.append(models.MLFeatureSnapshot.symbol.in_(symbols))
 
@@ -611,9 +687,12 @@ def list_latest_ml_predictions(
     market: str,
     model_id: Optional[int] = None,
     limit: int = 100,
+    include_indices: bool = False,
 ) -> list[models.MLPrediction]:
     markets = _ml_market_scope(market)
     stmt = select(models.MLPrediction).where(models.MLPrediction.market.in_(markets))
+    if not include_indices:
+        stmt = stmt.where(_non_index_symbol_pred(models.MLPrediction))
     if model_id:
         stmt = stmt.where(models.MLPrediction.model_id == model_id)
     stmt = stmt.order_by(models.MLPrediction.trade_date.desc(), models.MLPrediction.score_up_5d.desc()).limit(max(1, limit))

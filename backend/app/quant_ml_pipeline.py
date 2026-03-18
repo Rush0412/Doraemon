@@ -10,7 +10,7 @@ from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from sqlalchemy.orm import Session
 
 from . import crud
-from .quant_base import _market_scope, _normalize_symbols
+from .quant_base import _ensure_symbols_klines, _market_scope, _normalize_symbols, _seed_symbols_if_empty
 from .quant_ml_model_utils import (
     recommended_market_model_min_symbol_count,
     resolve_best_ml_model,
@@ -93,7 +93,7 @@ def _market_from_symbol(symbol: str) -> str:
         return "HK"
     if lower.startswith("sh"):
         return "SH"
-    if lower.startswith("sz3"):
+    if lower.startswith("sz30"):
         return "300"
     if lower.startswith("sz"):
         return "SZ"
@@ -162,12 +162,15 @@ def run_ml_feature_job(job_params: dict, db: Session) -> dict:
     feature_version = str(job_params.get("feature_version") or "v1")
     start = job_params.get("start")
     end = job_params.get("end")
+    n_folds = max(1, int(job_params.get("n_folds", 1) or 1))
     min_rows = int(job_params.get("min_rows", 120))
     symbol_limit = max(10, min(int(job_params.get("symbol_limit", 300)), 10000))
 
     raw_symbols = job_params.get("symbols")
-    symbols = _normalize_symbols(raw_symbols, market)
-    if not raw_symbols:
+    symbols = _normalize_symbols(raw_symbols, market, fallback_default=False)
+    symbol_source = "request" if symbols else "market_universe"
+    seeded_symbols = 0
+    if not symbols:
         markets = _market_scope(market)
         symbols = crud.list_kline_symbols_by_markets(
             db,
@@ -176,16 +179,61 @@ def run_ml_feature_job(job_params: dict, db: Session) -> dict:
             limit=symbol_limit,
         )
         if not symbols:
-            symbols = [
-                item.symbol for item in crud.list_stock_symbols_by_markets(db, markets)[:symbol_limit]
-            ]
+            seeded_symbols = _seed_symbols_if_empty(db, market)
+            rows, _ = crud.search_stock_symbols(
+                db,
+                markets=markets,
+                query=None,
+                kind="stock",
+                page=1,
+                page_size=symbol_limit,
+            )
+            symbols = [item.symbol for item in rows]
     symbols = list(dict.fromkeys([str(s).strip() for s in symbols if str(s).strip()]))
     if not symbols:
-        raise RuntimeError("No symbols available for ml_feature")
+        raise RuntimeError(
+            f"No symbols available for ml_feature market={market}. "
+            "Import symbol universe first."
+        )
 
     kline_df = _load_kline_frame(db, market=market, symbols=symbols, start=start, end=end, min_rows=min_rows)
+    bootstrap_attempted = False
+    bootstrap_fetch_limit = 0
+    bootstrap_fetched = 0
     if kline_df.empty:
-        raise RuntimeError("No kline rows available to build ML features")
+        auto_fetch_raw = job_params.get("auto_fetch_klines", True)
+        if isinstance(auto_fetch_raw, str):
+            auto_fetch = auto_fetch_raw.strip().lower() in {"1", "true", "yes", "y"}
+        else:
+            auto_fetch = bool(auto_fetch_raw)
+        if auto_fetch:
+            bootstrap_attempted = True
+            default_fetch_limit = min(symbol_limit, 300)
+            requested_fetch_limit = int(job_params.get("bootstrap_fetch_limit", default_fetch_limit) or default_fetch_limit)
+            bootstrap_fetch_limit = max(10, min(requested_fetch_limit, 2000, len(symbols)))
+            bootstrap_symbols = symbols[:bootstrap_fetch_limit]
+            missing_symbols = _ensure_symbols_klines(
+                db,
+                bootstrap_symbols,
+                start,
+                end,
+                n_folds,
+            )
+            bootstrap_fetched = len(bootstrap_symbols) - len(missing_symbols)
+            if bootstrap_fetched > 0:
+                kline_df = _load_kline_frame(
+                    db,
+                    market=market,
+                    symbols=bootstrap_symbols,
+                    start=start,
+                    end=end,
+                    min_rows=min_rows,
+                )
+    if kline_df.empty:
+        raise RuntimeError(
+            "No kline rows available to build ML features. "
+            "Run kl_update first or keep auto_fetch_klines=true to bootstrap data."
+        )
 
     feature_df, feature_cols = _build_feature_frame(kline_df)
     if feature_df.empty:
@@ -216,10 +264,15 @@ def run_ml_feature_job(job_params: dict, db: Session) -> dict:
         "message": "ml_feature finished",
         "market": market,
         "feature_version": feature_version,
+        "symbol_source": symbol_source,
+        "seeded_symbols": int(seeded_symbols),
         "symbols": len(set(feature_df["symbol"].tolist())),
         "rows_total": int(len(feature_df)),
         "rows_labeled": labeled,
         "rows_upserted": int(upserted),
+        "bootstrap_attempted": bootstrap_attempted,
+        "bootstrap_fetch_limit": int(bootstrap_fetch_limit),
+        "bootstrap_fetched": int(bootstrap_fetched),
         "feature_cols": feature_cols,
         "date_start": str(feature_df["trade_date"].min()),
         "date_end": str(feature_df["trade_date"].max()),
@@ -259,7 +312,13 @@ def run_ml_train_job(job_params: dict, db: Session) -> dict:
     train_ratio = float(job_params.get("train_ratio", 0.8))
     train_ratio = min(max(train_ratio, 0.6), 0.95)
     max_samples = max(1000, min(int(job_params.get("max_samples", 300000)), 1_000_000))
-    requested_symbols = _normalize_symbols(job_params.get("symbols"), market) if job_params.get("symbols") else None
+    requested_symbols = _normalize_symbols(
+        job_params.get("symbols"),
+        market,
+        fallback_default=False,
+    )
+    if not requested_symbols:
+        requested_symbols = None
 
     feature_rows = crud.list_ml_feature_snapshots(
         db,
@@ -331,7 +390,9 @@ def run_ml_train_job(job_params: dict, db: Session) -> dict:
         model_name = f"market_hgb_{market}_{target}_{feature_version}"
     else:
         model_name = f"custom_hgb_{market}_{target}_{feature_version}"
-    artifact_path = _model_store_dir() / f"{model_name}_{now_tag}.pkl"
+    artifact_name = f"{model_name}_{now_tag}.pkl"
+    artifact_path = _model_store_dir() / artifact_name
+    artifact_ref = f"model_store/{artifact_name}"
 
     payload = {
         "name": model_name,
@@ -345,13 +406,15 @@ def run_ml_train_job(job_params: dict, db: Session) -> dict:
         "val_end": val_df["trade_date"].max(),
         "params": {
             **model_params,
+            "train_ratio": train_ratio,
+            "max_samples": max_samples,
             "training_scope": model_scope,
             "training_symbol_count": int(frame["symbol"].nunique()),
             "training_markets": sorted({str(item).upper() for item in frame["market"].dropna().tolist()}),
             "requested_symbols": requested_symbols or [],
         },
         "metrics": metrics,
-        "artifact_path": str(artifact_path),
+        "artifact_path": artifact_ref,
         "status": "trained",
         "is_active": False,
     }
@@ -397,26 +460,34 @@ def run_ml_predict_job(job_params: dict, db: Session) -> dict:
     market = (job_params.get("market") or "CN").upper()
     target = str(job_params.get("target") or "y_up_5d")
     limit = max(1, min(int(job_params.get("limit", 50)), 500))
-    market_wide_mode = not job_params.get("symbols")
+    requested_model_id = job_params.get("model_id")
+    requested_symbols = _normalize_symbols(
+        job_params.get("symbols"),
+        market,
+        fallback_default=False,
+    )
+    market_wide_mode = not requested_symbols
+    allow_fallback_to_best = bool(market_wide_mode and not requested_model_id)
     model_row = resolve_best_ml_model(
         db,
         market=market,
         target=target,
-        model_id=job_params.get("model_id"),
+        model_id=requested_model_id,
         require_market_scope=market_wide_mode,
         min_symbol_count=(
             recommended_market_model_min_symbol_count(db, market)
             if market_wide_mode
             else 0
         ),
-        allow_fallback_to_best=market_wide_mode,
+        allow_fallback_to_best=allow_fallback_to_best,
+        attempt_repair=True,
     )
     scoring = score_latest_features_for_model(
         db,
         model_row=model_row,
         market=market,
         target=target,
-        symbols=job_params.get("symbols"),
+        symbols=requested_symbols,
         limit=max(limit * 4, 200),
         persist=True,
     )

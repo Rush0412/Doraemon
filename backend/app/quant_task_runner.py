@@ -5,6 +5,8 @@ from .quant_ml_pipeline import run_ml_feature_job, run_ml_predict_job, run_ml_tr
 from .quant_ml_stock_select import run_ml_stock_select_job
 import json
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+import time
 
 from .quant_base import *
 def _run_job(job_id: int):
@@ -19,6 +21,12 @@ def _run_job(job_id: int):
 
         if job.type == "kl_update":
             market = (job.params.get("market") or "CN").upper()
+            market_repair = None
+            if market in {"CN", "SZ", "300", "ALL", "A"}:
+                try:
+                    market_repair = crud.repair_cn_market_mislabels(db)
+                except Exception as exc:
+                    market_repair = {"error": str(exc)}
             raw_symbols = job.params.get("symbols")
             symbols = _normalize_symbols(raw_symbols, market)
             seeded = 0
@@ -30,35 +38,144 @@ def _run_job(job_id: int):
                     for item in crud.list_stock_symbols_by_markets(db, market_keys)
                 ]
                 symbols = [item for item in symbols if item]
+            symbols = list(dict.fromkeys([str(item).strip() for item in symbols if str(item).strip()]))
+            symbol_limit_raw = job.params.get("symbol_limit")
+            if symbol_limit_raw is not None:
+                try:
+                    symbol_limit = max(10, min(int(symbol_limit_raw), 50000))
+                    symbols = symbols[:symbol_limit]
+                except Exception:
+                    pass
             if not symbols:
                 raise RuntimeError("No symbols available; import symbols into database first.")
 
             n_folds = job.params.get("n_folds", 1)
             start = job.params.get("start")
             end = job.params.get("end")
+            n_jobs_raw = job.params.get("n_jobs", 8)
+            try:
+                n_jobs = max(1, min(int(n_jobs_raw), 64))
+            except Exception:
+                n_jobs = 8
+            run_mode = str(job.params.get("how") or "thread").strip().lower()
+            if run_mode not in {"thread", "main", "process"}:
+                run_mode = "thread"
+            if run_mode == "process":
+                # Kl update mainly spends time in I/O; process mode adds overhead and
+                # makes DB session coordination harder, so we route to thread mode.
+                run_mode = "thread"
+            source_order = job.params.get("source_order") or "akshare,abupy"
+            quick_fail_raw = job.params.get("quick_fail", True)
+            if isinstance(quick_fail_raw, str):
+                quick_fail = quick_fail_raw.strip().lower() in {"1", "true", "yes", "y"}
+            else:
+                quick_fail = bool(quick_fail_raw)
+            symbol_timeout_raw = job.params.get("symbol_timeout_sec", 20 if quick_fail else 45)
+            try:
+                symbol_timeout_sec = max(3, min(int(symbol_timeout_raw), 600))
+            except Exception:
+                symbol_timeout_sec = 20 if quick_fail else 45
             total_rows = 0
             updated_symbols = 0
             missing_symbols = []
+            timed_out_symbols = []
+            total_symbols = len(symbols)
+
+            def _fetch_symbol_rows(symbol: str):
+                kl = _load_symbol_kl_df(
+                    symbol,
+                    start=start,
+                    end=end,
+                    n_folds=n_folds,
+                    source_order=source_order,
+                    quick_mode=quick_fail,
+                )
+                if kl is None or getattr(kl, "empty", False):
+                    return symbol, None
+                rows = _kl_rows_from_df(kl, _market_from_symbol(symbol), symbol)
+                if not rows:
+                    return symbol, None
+                return symbol, rows
+
+            def _consume_symbol_rows(symbol: str, rows):
+                nonlocal total_rows, updated_symbols, missing_symbols
+                if not rows:
+                    missing_symbols.append(symbol)
+                    return
+                total_rows += crud.upsert_stock_klines(db, rows)
+                updated_symbols += 1
+
+            done = 0
             with _with_pg_data_env(market):
-                for symbol in symbols:
-                    kl = _load_symbol_kl_df(symbol, start=start, end=end, n_folds=n_folds)
-                    if kl is None or getattr(kl, "empty", False):
-                        missing_symbols.append(symbol)
-                        continue
-                    rows = _kl_rows_from_df(kl, _market_from_symbol(symbol), symbol)
-                    total_rows += crud.upsert_stock_klines(db, rows)
-                    updated_symbols += 1
+                if run_mode == "main" or n_jobs <= 1 or total_symbols <= 1:
+                    for symbol in symbols:
+                        _, rows = _fetch_symbol_rows(symbol)
+                        _consume_symbol_rows(symbol, rows)
+                        done += 1
+                        if job.id and (done == total_symbols or done % 20 == 0):
+                            crud.touch_quant_job(db, job.id, status="running")
+                else:
+                    pool = ThreadPoolExecutor(max_workers=n_jobs)
+                    try:
+                        future_map = {pool.submit(_fetch_symbol_rows, symbol): symbol for symbol in symbols}
+                        future_started_at = {future: time.monotonic() for future in future_map}
+                        pending = set(future_map.keys())
+                        while pending:
+                            completed, pending = wait(pending, timeout=1.0, return_when=FIRST_COMPLETED)
+                            for future in completed:
+                                symbol = future_map[future]
+                                try:
+                                    _, rows = future.result()
+                                except Exception:
+                                    rows = None
+                                _consume_symbol_rows(symbol, rows)
+                                done += 1
+                            now = time.monotonic()
+                            expired = [
+                                future
+                                for future in list(pending)
+                                if (now - future_started_at.get(future, now)) >= float(symbol_timeout_sec)
+                            ]
+                            for future in expired:
+                                symbol = future_map[future]
+                                pending.remove(future)
+                                timed_out_symbols.append(symbol)
+                                missing_symbols.append(symbol)
+                                done += 1
+                            if job.id and (done == total_symbols or done % 20 == 0):
+                                crud.touch_quant_job(db, job.id, status="running")
+                    finally:
+                        pool.shutdown(wait=False, cancel_futures=True)
+
+            symbols_preview_limit = 200
+            symbols_preview = symbols[:symbols_preview_limit]
+            missing_preview = missing_symbols[:symbols_preview_limit]
+            timed_out_preview = timed_out_symbols[:symbols_preview_limit]
 
             crud.set_quant_job_result(
                 db,
                 job,
                 {
                     "message": "kl_update finished",
-                    "symbols": symbols,
+                    "market": market,
+                    "run_mode": run_mode,
+                    "n_jobs": n_jobs,
+                    "source_order": source_order,
+                    "quick_fail": quick_fail,
+                    "symbol_timeout_sec": symbol_timeout_sec,
+                    "symbols_count": total_symbols,
+                    "symbols": symbols_preview,
+                    "symbols_truncated": bool(total_symbols > len(symbols_preview)),
                     "rows": total_rows,
                     "seeded_symbols": seeded,
                     "updated_symbols": updated_symbols,
-                    "missing_symbols": missing_symbols[:200],
+                    "missing_symbols_count": len(missing_symbols),
+                    "missing_symbols": missing_preview,
+                    "missing_symbols_truncated": bool(len(missing_symbols) > len(missing_preview)),
+                    "timed_out_symbols_count": len(timed_out_symbols),
+                    "timed_out_symbols": timed_out_preview,
+                    "timed_out_symbols_truncated": bool(len(timed_out_symbols) > len(timed_out_preview)),
+                    "market_repair": market_repair,
                 },
             )
             return
@@ -558,19 +675,32 @@ def _run_job(job_id: int):
                 all_symbols = all_symbols_raw.strip().lower() in {"1", "true", "yes", "y"}
             else:
                 all_symbols = bool(all_symbols_raw)
-            candidate_limit = max(20, min(int(job.params.get("candidate_limit", 300)), 5000))
-            symbol_top_n = max(1, min(int(job.params.get("symbol_top_n", 10)), 50))
-            symbol_eval_limit = max(10, min(int(job.params.get("symbol_eval_limit", candidate_limit)), 500))
+            full_market_scan_raw = job.params.get("full_market_scan")
+            if isinstance(full_market_scan_raw, str):
+                full_market_scan = full_market_scan_raw.strip().lower() in {"1", "true", "yes", "y"}
+            elif full_market_scan_raw is None:
+                full_market_scan = bool(all_symbols)
+            else:
+                full_market_scan = bool(full_market_scan_raw)
+            candidate_limit = max(20, min(int(job.params.get("candidate_limit", 300)), 20000))
+            symbol_top_n = max(1, min(int(job.params.get("symbol_top_n", 10)), 100))
+            symbol_eval_limit = max(10, min(int(job.params.get("symbol_eval_limit", candidate_limit)), 20000))
             min_kline_rows = max(60, min(int(job.params.get("min_kline_rows", 120)), 2000))
 
             symbols = list(dict.fromkeys(requested_symbols))
             used_all_symbols = False
             if all_symbols:
-                symbols = _load_candidate_symbols_from_db(db, market, limit=max(candidate_limit, symbol_eval_limit))
+                db_symbol_limit = max(candidate_limit, symbol_eval_limit)
+                if full_market_scan:
+                    db_symbol_limit = max(db_symbol_limit, 20000)
+                symbols = _load_candidate_symbols_from_db(db, market, limit=db_symbol_limit)
                 used_all_symbols = True
             if not symbols:
                 raise RuntimeError("No symbols specified for stock select.")
-            symbols = symbols[: max(candidate_limit, symbol_eval_limit)]
+            if not full_market_scan:
+                symbols = symbols[: max(candidate_limit, symbol_eval_limit)]
+            if full_market_scan:
+                symbol_eval_limit = max(symbol_eval_limit, len(symbols))
 
             available_symbols = []
             missing_symbols = []
@@ -634,6 +764,7 @@ def _run_job(job_id: int):
                 "evaluated_symbols": int(symbol_eval.get("evaluated", 0) or 0),
                 "top_n": len(top_symbols),
                 "all_symbols_mode": used_all_symbols,
+                "full_market_scan": bool(full_market_scan),
                 "candidate_limit": candidate_limit,
                 "eval_limit": symbol_eval_limit,
                 "start": start,
@@ -647,6 +778,7 @@ def _run_job(job_id: int):
                 "evaluated_symbols": int(symbol_eval.get("evaluated", 0) or 0),
                 "truncated": bool(symbol_eval.get("truncated")),
                 "all_symbols_mode": used_all_symbols,
+                "full_market_scan": bool(full_market_scan),
                 "candidate_limit": candidate_limit,
                 "eval_limit": symbol_eval_limit,
                 "min_kline_rows": min_kline_rows,

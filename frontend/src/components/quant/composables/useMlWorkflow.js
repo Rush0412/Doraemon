@@ -50,10 +50,10 @@ export function useMlWorkflow({
     model_id: null,
     symbols: '',
     min_score: 0.55,
-    prediction_limit: 300,
-    candidate_limit: 120,
+    prediction_limit: 3000,
+    candidate_limit: 3000,
     symbol_top_n: 20,
-    symbol_eval_limit: 120,
+    symbol_eval_limit: 3000,
     min_kline_rows: 120
   })
 
@@ -84,19 +84,21 @@ export function useMlWorkflow({
   })
 
   const refreshMlData = async () => {
-    await Promise.all([
-      store.fetchMlModels({
-        market: mlTrainForm.market,
-        target: mlTrainForm.target,
-        limit: 100
-      }),
-      store.fetchMlPredictions({
-        market: mlPredictForm.market,
-        modelId: mlPredictForm.model_id,
-        limit: Math.max(20, Number(mlPredictForm.limit || 20))
-      })
-    ])
+    await store.fetchMlModels({
+      market: mlTrainForm.market,
+      target: mlTrainForm.target,
+      limit: 100
+    })
     syncRecommendedModelSelection()
+    await store.fetchMlPredictions({
+      market: mlPredictForm.market,
+      target: mlPredictForm.target,
+      modelId: mlPredictForm.model_id,
+      limit: Math.max(20, Number(mlPredictForm.limit || 20)),
+      actions: 'buy,light_buy',
+      recommendedOnly: true,
+      uniqueSymbols: true
+    })
   }
 
   const setMlMarket = (nextMarket) => {
@@ -149,6 +151,14 @@ export function useMlWorkflow({
   }
 
   const buildSelectPayload = () => {
+    const rawSymbols = String(mlSelectForm.symbols || '').trim()
+    const isMarketWide = !rawSymbols
+    const marketWideLimitBase = Math.max(
+      3000,
+      Number(mlSelectForm.prediction_limit || 0),
+      Number(mlSelectForm.candidate_limit || 0),
+      Number(mlSelectForm.symbol_eval_limit || 0)
+    )
     const basePayload =
       typeof buildMlStockSelectPayload === 'function'
         ? buildMlStockSelectPayload(mlSelectForm)
@@ -156,12 +166,19 @@ export function useMlWorkflow({
             market: mlSelectForm.market,
             target: mlSelectForm.target,
             model_id: mlSelectForm.model_id || undefined,
-            symbols: mlSelectForm.symbols || undefined,
+            symbols: rawSymbols || undefined,
+            full_market_scan: isMarketWide,
             min_score: Number(mlSelectForm.min_score || 0.55),
-            prediction_limit: Number(mlSelectForm.prediction_limit || 300),
-            candidate_limit: Number(mlSelectForm.candidate_limit || 120),
+            prediction_limit: isMarketWide
+              ? Math.max(marketWideLimitBase, Number(mlSelectForm.prediction_limit || 3000))
+              : Number(mlSelectForm.prediction_limit || 300),
+            candidate_limit: isMarketWide
+              ? Math.max(marketWideLimitBase, Number(mlSelectForm.candidate_limit || 3000))
+              : Number(mlSelectForm.candidate_limit || 120),
             symbol_top_n: Number(mlSelectForm.symbol_top_n || 20),
-            symbol_eval_limit: Number(mlSelectForm.symbol_eval_limit || 120),
+            symbol_eval_limit: isMarketWide
+              ? Math.max(marketWideLimitBase, Number(mlSelectForm.symbol_eval_limit || 3000))
+              : Number(mlSelectForm.symbol_eval_limit || 120),
             min_kline_rows: Number(mlSelectForm.min_kline_rows || 120)
           }
     const effectiveMarket = inferMarketBySymbols(basePayload.symbols, basePayload.market || mlSelectForm.market)
@@ -328,9 +345,45 @@ export function useMlWorkflow({
     await refreshMlData()
   }
 
+  const numberOrNull = (value) => {
+    const num = Number(value)
+    return Number.isFinite(num) ? num : null
+  }
+
+  const resolvePredictionSignal = (symbol) => {
+    const text = String(symbol || '').trim()
+    if (!text) return null
+    const key = text.toLowerCase()
+    const sameSymbol = (row) => String(row?.symbol || '').trim().toLowerCase() === key
+    const mlSelect = mlSelectResult.value || {}
+    const fromSelect = [
+      ...(Array.isArray(mlSelect.buy_candidates) ? mlSelect.buy_candidates : []),
+      ...(Array.isArray(mlSelect.top_symbols) ? mlSelect.top_symbols : []),
+      ...(Array.isArray(mlSelect.ml_candidates) ? mlSelect.ml_candidates : [])
+    ]
+    const fromPredictionList = Array.isArray(store.mlPredictions) ? store.mlPredictions : []
+    const row = fromSelect.find(sameSymbol) || fromPredictionList.find(sameSymbol)
+    if (!row) return null
+    const action = String(row.ml_action || row.action || '').trim().toLowerCase() || null
+    return {
+      symbol: text,
+      trade_date: row.trade_date || null,
+      action,
+      score_up_5d: numberOrNull(row.score_up_5d),
+      expected_ret_5d: numberOrNull(row.expected_ret_5d),
+      stop_loss: numberOrNull(row.stop_loss),
+      take_profit: numberOrNull(row.take_profit),
+      entry_price: numberOrNull(row.last_close ?? row.entry_price ?? row.close),
+      position_min: numberOrNull(row.position_min),
+      position_max: numberOrNull(row.position_max)
+    }
+  }
+
   const applyPredictionToBacktest = (symbol) => {
     if (!symbol || typeof onUsePrediction !== 'function') return
-    onUsePrediction(String(symbol).trim())
+    const text = String(symbol).trim()
+    if (!text) return
+    onUsePrediction(text, resolvePredictionSignal(text))
   }
 
   const applyPredictionToPool = (symbol) => {

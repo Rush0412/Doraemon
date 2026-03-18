@@ -1,12 +1,18 @@
+import logging
 import pickle
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
+import pandas as pd
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.metrics import accuracy_score, log_loss, roc_auc_score
 from sqlalchemy.orm import Session
 
 from . import crud
 from .quant_base import _normalize_symbols
+
+logger = logging.getLogger("doraemon")
 
 
 def _repo_root() -> Path:
@@ -17,6 +23,275 @@ def _model_store_dir() -> Path:
     model_dir = _repo_root() / "backend" / "model_store"
     model_dir.mkdir(parents=True, exist_ok=True)
     return model_dir
+
+
+def _safe_float_or_none(v):
+    if v is None:
+        return None
+    try:
+        value = float(v)
+        if pd.isna(value):
+            return None
+        return value
+    except Exception:
+        return None
+
+
+def _is_under_model_store(path_obj: Path) -> bool:
+    model_store = _model_store_dir().resolve()
+    resolved = path_obj.resolve()
+    return model_store in resolved.parents
+
+
+def _artifact_candidates(path_text: str) -> list[Path]:
+    value = str(path_text or "").strip()
+    if not value:
+        return []
+    raw = Path(value)
+    model_store = _model_store_dir().resolve()
+    repo_backend = (_repo_root() / "backend").resolve()
+    candidates = []
+    if raw.is_absolute():
+        candidates.append(raw)
+        candidates.append(model_store / raw.name)
+    else:
+        candidates.append(model_store / raw)
+        candidates.append(repo_backend / raw)
+        candidates.append(model_store / raw.name)
+
+    seen = set()
+    unique = []
+    for item in candidates:
+        try:
+            resolved = item.resolve()
+        except Exception:
+            continue
+        key = str(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        if _is_under_model_store(resolved):
+            unique.append(resolved)
+    return unique
+
+
+def _resolve_existing_artifact_path(path_text: str) -> Optional[Path]:
+    for item in _artifact_candidates(path_text):
+        if item.exists():
+            return item
+    return None
+
+
+def model_artifact_available(model_row) -> bool:
+    return _resolve_existing_artifact_path(model_row.artifact_path or "") is not None
+
+
+def _artifact_file_exists(model_row) -> bool:
+    return model_artifact_available(model_row)
+
+
+def _build_training_frame_for_recovery(feature_rows: list) -> tuple[pd.DataFrame, list[str]]:
+    records = []
+    feature_cols = None
+    for item in feature_rows:
+        feats = item.features or {}
+        if not feats:
+            continue
+        if feature_cols is None:
+            feature_cols = sorted([str(key) for key in feats.keys()])
+        rec = {col: _safe_float_or_none(feats.get(col)) for col in feature_cols}
+        rec["market"] = item.market
+        rec["symbol"] = item.symbol
+        rec["trade_date"] = item.trade_date
+        rec["y_up_5d"] = item.y_up_5d
+        rec["y_ret_5d"] = item.y_ret_5d
+        rec["y_mdd_10d"] = item.y_mdd_10d
+        records.append(rec)
+    if not records or not feature_cols:
+        return pd.DataFrame(), []
+    frame = pd.DataFrame.from_records(records)
+    frame = frame.dropna(subset=feature_cols)
+    return frame, feature_cols
+
+
+def _derive_train_ratio(model_row) -> float:
+    params = model_row.params or {}
+    metrics = model_row.metrics or {}
+    try:
+        ratio = float(params.get("train_ratio"))
+        if 0.5 < ratio < 0.96:
+            return min(max(ratio, 0.6), 0.95)
+    except Exception:
+        pass
+    try:
+        samples_total = float(metrics.get("samples_total"))
+        samples_train = float(metrics.get("samples_train"))
+        if samples_total > 0:
+            ratio = samples_train / samples_total
+            if 0.5 < ratio < 0.96:
+                return min(max(ratio, 0.6), 0.95)
+    except Exception:
+        pass
+    return 0.8
+
+
+def _derive_max_samples(model_row) -> int:
+    params = model_row.params or {}
+    metrics = model_row.metrics or {}
+    raw = params.get("max_samples", metrics.get("samples_total", 300000))
+    try:
+        value = int(raw)
+    except Exception:
+        value = 300000
+    return max(1000, min(value, 1_000_000))
+
+
+def _artifact_reference_for_db(artifact_path: Path) -> str:
+    return f"model_store/{artifact_path.name}"
+
+
+def _rebuild_model_artifact(db: Session, model_row) -> Path:
+    algo = str(model_row.algo or "")
+    if algo != "HistGradientBoostingClassifier":
+        raise RuntimeError(f"Unsupported model algo for rebuild: {algo}")
+
+    request_market = str(model_row.market or "CN").strip().upper()
+    target = str(model_row.target or "y_up_5d").strip()
+    feature_version = str(model_row.feature_version or "v1").strip()
+    params = dict(model_row.params or {})
+    requested_symbols_raw = params.get("requested_symbols") or []
+    requested_symbols = [
+        str(item).strip()
+        for item in requested_symbols_raw
+        if str(item).strip()
+    ]
+    if not requested_symbols:
+        requested_symbols = None
+
+    max_samples = _derive_max_samples(model_row)
+    feature_rows = crud.list_ml_feature_snapshots(
+        db,
+        market=request_market,
+        feature_version=feature_version,
+        symbols=requested_symbols,
+        limit=max_samples,
+    )
+    if not feature_rows:
+        raise RuntimeError(
+            "Cannot rebuild model artifact: no feature snapshots found in database."
+        )
+
+    frame, feature_cols = _build_training_frame_for_recovery(feature_rows)
+    if frame.empty:
+        raise RuntimeError("Cannot rebuild model artifact: training frame is empty after cleaning.")
+    if target not in frame.columns:
+        raise RuntimeError(f"Cannot rebuild model artifact: target column {target} not found.")
+
+    frame = frame.dropna(subset=[target]).copy()
+    if frame.empty:
+        raise RuntimeError("Cannot rebuild model artifact: no labeled rows available.")
+    frame = frame.sort_values("trade_date").reset_index(drop=True)
+
+    train_ratio = _derive_train_ratio(model_row)
+    split_idx = int(len(frame) * train_ratio)
+    if len(frame) >= 300:
+        split_idx = min(max(split_idx, 200), len(frame) - 100)
+    else:
+        split_idx = min(max(split_idx, max(1, len(frame) // 2)), len(frame) - 1)
+    if split_idx <= 0 or split_idx >= len(frame):
+        raise RuntimeError("Cannot rebuild model artifact: invalid train/validation split.")
+
+    train_df = frame.iloc[:split_idx]
+    val_df = frame.iloc[split_idx:]
+    if train_df[target].nunique() < 2:
+        raise RuntimeError("Cannot rebuild model artifact: training labels contain only one class.")
+    if val_df.empty:
+        raise RuntimeError("Cannot rebuild model artifact: validation set is empty.")
+
+    model_params = {
+        "max_iter": int(params.get("max_iter", 300)),
+        "learning_rate": float(params.get("learning_rate", 0.05)),
+        "max_depth": int(params.get("max_depth", 6)),
+        "l2_regularization": float(params.get("l2_regularization", 0.0)),
+        "min_samples_leaf": int(params.get("min_samples_leaf", 30)),
+        "random_state": 42,
+    }
+    clf = HistGradientBoostingClassifier(**model_params)
+    clf.fit(train_df[feature_cols], train_df[target].astype(int))
+
+    y_val = val_df[target].astype(int).values
+    val_prob = clf.predict_proba(val_df[feature_cols])[:, 1]
+    val_pred = (val_prob >= 0.5).astype(int)
+    recovered_metrics = {
+        "samples_total": int(len(frame)),
+        "samples_train": int(len(train_df)),
+        "samples_val": int(len(val_df)),
+        "symbol_count": int(frame["symbol"].nunique()),
+        "accuracy": float(accuracy_score(y_val, val_pred)),
+    }
+    if pd.Series(y_val).nunique() > 1:
+        recovered_metrics["auc"] = float(roc_auc_score(y_val, val_prob))
+        recovered_metrics["log_loss"] = float(log_loss(y_val, val_prob, labels=[0, 1]))
+    else:
+        recovered_metrics["auc"] = None
+        recovered_metrics["log_loss"] = None
+
+    now_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+    artifact_name = f"{str(model_row.name or 'model').strip()}_{now_tag}_rebuild.pkl"
+    artifact_path = _model_store_dir() / artifact_name
+    artifact_payload = {
+        "model_id": model_row.id,
+        "model_name": model_row.name,
+        "market": request_market,
+        "target": target,
+        "feature_version": feature_version,
+        "feature_cols": feature_cols,
+        "metrics": recovered_metrics,
+        "training_scope": params.get("training_scope") or ("custom" if requested_symbols else "market"),
+        "training_symbol_count": int(frame["symbol"].nunique()),
+        "trained_at": datetime.now().isoformat(),
+        "rebuild_from_db": True,
+        "estimator": clf,
+    }
+    with open(artifact_path, "wb") as f:
+        pickle.dump(artifact_payload, f)
+
+    old_path = str(model_row.artifact_path or "").strip()
+    params["artifact_rebuild_count"] = int(params.get("artifact_rebuild_count", 0) or 0) + 1
+    params["artifact_rebuilt_at"] = datetime.now().isoformat()
+    if old_path:
+        params["artifact_previous_path"] = old_path
+    params["train_ratio"] = train_ratio
+    params["max_samples"] = max_samples
+    if requested_symbols is not None:
+        params["requested_symbols"] = requested_symbols
+
+    metrics = dict(model_row.metrics or {})
+    metrics["rebuild_latest"] = recovered_metrics
+
+    model_row.params = params
+    model_row.metrics = metrics
+    model_row.artifact_path = _artifact_reference_for_db(artifact_path)
+    db.add(model_row)
+    db.commit()
+    db.refresh(model_row)
+    logger.warning("ml model artifact rebuilt model_id=%s old_path=%s new_path=%s", model_row.id, old_path, model_row.artifact_path)
+    return artifact_path
+
+
+def ensure_model_artifact(db: Session, model_row, *, attempt_repair: bool = False) -> Path:
+    existing = _resolve_existing_artifact_path(model_row.artifact_path or "")
+    if existing is not None:
+        desired_ref = _artifact_reference_for_db(existing)
+        if str(model_row.artifact_path or "").strip() != desired_ref:
+            model_row.artifact_path = desired_ref
+            db.add(model_row)
+            db.commit()
+            db.refresh(model_row)
+        return existing
+    if not attempt_repair:
+        raise RuntimeError(f"Model artifact not found: {model_row.artifact_path}")
+    return _rebuild_model_artifact(db, model_row)
 
 
 def ml_model_scope(model_row) -> str:
@@ -76,6 +351,7 @@ def resolve_best_ml_model(
     require_market_scope: bool = False,
     min_symbol_count: int = 0,
     allow_fallback_to_best: bool = False,
+    attempt_repair: bool = False,
 ):
     request_market = str(market or "CN").strip().upper()
     request_target = str(target or "y_up_5d").strip()
@@ -99,7 +375,11 @@ def resolve_best_ml_model(
                 "Train a full-market model first."
             )
         else:
-            return model_row
+            try:
+                ensure_model_artifact(db, model_row, attempt_repair=attempt_repair)
+                return model_row
+            except Exception as exc:
+                explicit_error = str(exc)
         if not allow_fallback_to_best:
             raise RuntimeError(explicit_error)
 
@@ -119,8 +399,8 @@ def resolve_best_ml_model(
         raise RuntimeError(
             explicit_error
             or
-            f"No qualified market-wide model available for market={request_market}, target={request_target}. "
-            "Train the market model first."
+            f"No qualified model available for market={request_market}, target={request_target}. "
+            "Train and promote a qualified market model."
         )
 
     def rank_key(item):
@@ -141,19 +421,35 @@ def resolve_best_ml_model(
         )
 
     rows = sorted(rows, key=rank_key, reverse=True)
-    return rows[0]
+    candidate_errors = []
+    for item in rows:
+        try:
+            ensure_model_artifact(db, item, attempt_repair=attempt_repair)
+            return item
+        except Exception as exc:
+            candidate_errors.append(f"id={item.id}: {exc}")
+            continue
+    if candidate_errors:
+        detail = "; ".join(candidate_errors[:3])
+        raise RuntimeError(
+            explicit_error
+            or
+            f"No model with available artifact for market={request_market}, target={request_target}. {detail}"
+        )
+    raise RuntimeError(
+        explicit_error
+        or
+        f"No model available for market={request_market}, target={request_target}."
+    )
 
 
-def load_ml_model_artifact(model_row) -> dict:
-    if not model_row.artifact_path:
-        raise RuntimeError("Model artifact path is empty.")
-
-    artifact_path = Path(model_row.artifact_path).resolve()
-    model_store = _model_store_dir().resolve()
-    if model_store not in artifact_path.parents:
-        raise RuntimeError("Model artifact path is not allowed.")
-    if not artifact_path.exists():
-        raise RuntimeError(f"Model artifact not found: {artifact_path}")
+def load_ml_model_artifact(model_row, *, db: Optional[Session] = None, attempt_repair: bool = False) -> dict:
+    if db is not None:
+        artifact_path = ensure_model_artifact(db, model_row, attempt_repair=attempt_repair)
+    else:
+        artifact_path = _resolve_existing_artifact_path(model_row.artifact_path or "")
+        if artifact_path is None:
+            raise RuntimeError(f"Model artifact not found: {model_row.artifact_path}")
 
     with open(artifact_path, "rb") as f:
         artifact = pickle.load(f)
@@ -195,17 +491,19 @@ def score_latest_features_for_model(
             f"Model target mismatch: model={model_row.target}, request={request_target}"
         )
 
-    artifact = load_ml_model_artifact(model_row)
+    artifact = load_ml_model_artifact(model_row, db=db, attempt_repair=True)
     feature_version = str(artifact.get("feature_version") or model_row.feature_version or "v1")
     feature_cols = artifact.get("feature_cols") or []
     estimator = artifact.get("estimator")
 
     normalized_symbols = (
-        _normalize_symbols(symbols, request_market) if symbols else None
+        _normalize_symbols(symbols, request_market, fallback_default=False) if symbols else None
     )
+    if not normalized_symbols:
+        normalized_symbols = None
     feature_fetch_limit = max(int(limit or 100), 200)
     if not normalized_symbols:
-        feature_fetch_limit = max(feature_fetch_limit, 5000)
+        feature_fetch_limit = max(feature_fetch_limit, 20000)
     latest_rows = crud.list_latest_ml_feature_snapshots(
         db,
         market=request_market,
@@ -222,7 +520,10 @@ def score_latest_features_for_model(
     scored_rows = []
     for item in latest_rows:
         feats = item.features or {}
-        x = np.array([[float(feats.get(col, 0.0) or 0.0) for col in feature_cols]], dtype=float)
+        x = pd.DataFrame(
+            [[float(feats.get(col, 0.0) or 0.0) for col in feature_cols]],
+            columns=feature_cols,
+        )
         prob = float(estimator.predict_proba(x)[0, 1])
         action, pos_min, pos_max = score_to_action(prob)
         expected_ret = float((prob - 0.5) * 0.12)

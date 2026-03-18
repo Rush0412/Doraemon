@@ -46,7 +46,7 @@ class QuantPayloadBase(BaseModel):
     start: Optional[str] = None
     end: Optional[str] = None
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", protected_namespaces=())
 
 
 class KlineUpdatePayload(QuantPayloadBase):
@@ -93,10 +93,10 @@ class MLStockSelectPayload(BacktestPayload):
     min_score: float = Field(default=0.55, ge=0.0, le=1.0)
     min_expected_ret_5d: Optional[float] = None
     allowed_actions: list[str] = Field(default_factory=lambda: ["buy", "light_buy"])
-    prediction_limit: int = Field(default=300, ge=20, le=2000)
-    candidate_limit: int = Field(default=120, ge=10, le=1000)
+    prediction_limit: int = Field(default=300, ge=20, le=50000)
+    candidate_limit: int = Field(default=120, ge=10, le=50000)
     symbol_top_n: int = Field(default=20, ge=1, le=100)
-    symbol_eval_limit: int = Field(default=120, ge=10, le=1000)
+    symbol_eval_limit: int = Field(default=120, ge=10, le=50000)
     min_kline_rows: int = Field(default=120, ge=60, le=2000)
 
 

@@ -218,12 +218,27 @@ export const useQuantStore = defineStore('quant', {
         this.mlLoading = false
       }
     },
-    async fetchMlPredictions({ market = 'CN', modelId = null, limit = 100 } = {}) {
+    async fetchMlPredictions({
+      market = 'CN',
+      target = 'y_up_5d',
+      modelId = null,
+      limit = 100,
+      actions = null,
+      recommendedOnly = true,
+      uniqueSymbols = true
+    } = {}) {
       this.mlLoading = true
       this.mlError = null
       try {
-        const params = { market, limit }
+        const params = {
+          market,
+          target,
+          limit,
+          recommended_only: recommendedOnly,
+          unique_symbols: uniqueSymbols
+        }
         if (modelId) params.model_id = modelId
+        if (actions) params.actions = actions
         const { data } = await api.get('/quant/ml/predictions', { params })
         this.mlPredictions = Array.isArray(data.data) ? data.data : []
       } catch (err) {

@@ -8,9 +8,15 @@ from .quant_ml_model_utils import (
     ml_model_markets,
     ml_model_scope,
     ml_model_symbol_count,
+    model_artifact_available,
     recommended_market_model_min_symbol_count,
     resolve_best_ml_model,
 )
+
+
+def _is_index_symbol(symbol: str) -> bool:
+    lower = str(symbol or "").strip().lower()
+    return lower.startswith("sh000") or lower.startswith("sz399")
 
 
 def list_ml_models(
@@ -49,6 +55,7 @@ def list_ml_models(
             "is_recommended": bool(recommended_id and int(item.id) == recommended_id),
             "status": item.status,
             "is_active": bool(item.is_active),
+            "artifact_available": model_artifact_available(item),
             "train_start": item.train_start.isoformat() if item.train_start else None,
             "train_end": item.train_end.isoformat() if item.train_end else None,
             "val_start": item.val_start.isoformat() if item.val_start else None,
@@ -81,10 +88,70 @@ def promote_ml_model(model_id: int, db: Session):
 def list_ml_predictions(
     db: Session,
     market: str = "CN",
+    target: str = "y_up_5d",
     model_id: Optional[int] = None,
     limit: int = 100,
+    actions: Optional[str] = None,
+    recommended_only: bool = True,
+    unique_symbols: bool = True,
+    include_indices: bool = False,
 ):
-    rows = crud.list_latest_ml_predictions(db, market=market, model_id=model_id, limit=limit)
+    request_market = str(market or "CN").strip().upper()
+    request_target = str(target or "y_up_5d").strip()
+    selected_model_id = model_id
+    if selected_model_id is None and recommended_only:
+        try:
+            selected = resolve_best_ml_model(
+                db,
+                market=request_market,
+                target=request_target,
+                require_market_scope=True,
+                min_symbol_count=recommended_market_model_min_symbol_count(db, request_market),
+                allow_fallback_to_best=True,
+                attempt_repair=True,
+            )
+            selected_model_id = int(selected.id)
+        except Exception:
+            selected_model_id = None
+
+    fetch_limit = max(1, int(limit or 100))
+    if unique_symbols or actions or recommended_only:
+        fetch_limit = max(fetch_limit * 20, 500)
+    rows = crud.list_latest_ml_predictions(
+        db,
+        market=request_market,
+        model_id=selected_model_id,
+        limit=fetch_limit,
+        include_indices=include_indices,
+    )
+
+    action_filter: Optional[set[str]] = None
+    if actions:
+        action_filter = {
+            str(item).strip().lower()
+            for item in str(actions).split(",")
+            if str(item).strip()
+        }
+    elif recommended_only:
+        action_filter = {"buy", "light_buy"}
+
+    picked = []
+    seen_symbols = set()
+    for item in rows:
+        action_text = str(item.action or "").strip().lower()
+        if action_filter and action_text not in action_filter:
+            continue
+        symbol_text = str(item.symbol or "").strip()
+        if not include_indices and _is_index_symbol(symbol_text):
+            continue
+        if unique_symbols:
+            if symbol_text in seen_symbols:
+                continue
+            seen_symbols.add(symbol_text)
+        picked.append(item)
+        if len(picked) >= max(1, int(limit or 100)):
+            break
+
     data = [
         {
             "id": item.id,
@@ -100,6 +167,6 @@ def list_ml_predictions(
             "position_max": item.position_max,
             "meta": item.meta or {},
         }
-        for item in rows
+        for item in picked
     ]
     return schemas.APIResponse(data=data)

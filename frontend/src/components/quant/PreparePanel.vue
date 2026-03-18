@@ -13,6 +13,7 @@
         <div>
           <label class="label">市场</label>
           <select :value="market" class="select" @change="emit('update:market', $event.target.value)">
+            <option value="CN">CN (All A Shares)</option>
             <option value="SH">SH (Shanghai)</option>
             <option value="SZ">SZ (Shenzhen)</option>
             <option value="300">300 (ChiNext)</option>
@@ -181,6 +182,7 @@
       </div>
       <div class="toolbar">
         <button class="btn-primary" @click="runKlUpdate" :disabled="actionsBusy">启动更新</button>
+        <button class="btn-secondary" @click="runFullAshareUpdate" :disabled="actionsBusy">一键补全A股K线</button>
         <span class="muted">将创建异步任务</span>
       </div>
       <div class="update-targets">
@@ -262,7 +264,8 @@ defineProps({
   removeSymbol: Function,
   changePage: Function,
   applyPageSize: Function,
-  runKlUpdate: Function
+  runKlUpdate: Function,
+  runFullAshareUpdate: Function
 })
 
 const updatePortfolioDraftName = (event) => {

@@ -97,6 +97,7 @@
       :change-page="changePage"
       :apply-page-size="applyPageSize"
       :run-kl-update="runKlUpdate"
+      :run-full-ashare-update="runFullAshareUpdate"
     />
     <StrategyPanel
       :active="activeTab === 'strategy'"
@@ -334,6 +335,7 @@ const chartSymbol = ref('')
 const orderFilter = ref('all')
 const selectedOrderKey = ref('')
 const selectedOrder = ref(null)
+const predictionSignal = ref(null)
 const showStopLines = ref(true)
 const analysisOverlayEnabled = ref(true)
 const gridUseBacktestBase = ref(true)
@@ -392,7 +394,7 @@ const gridForm = reactive({
     drawdown: 1.0
   },
   symbol_top_n: 10,
-  symbol_eval_limit: 120,
+  symbol_eval_limit: 3000,
   n_folds: 1,
   start: '',
   end: '',
@@ -798,13 +800,33 @@ const applyGridNextSuggestions = () => {
     })
   }
 }
-const applySymbolToBacktest = (symbol) => {
+const toFiniteNumberOrNull = (value) => {
+  const num = Number(value)
+  return Number.isFinite(num) ? num : null
+}
+const normalizePredictionSignal = (symbol, signal) => {
+  if (!signal || typeof signal !== 'object') return null
+  return {
+    symbol: String(symbol || signal.symbol || '').trim(),
+    trade_date: signal.trade_date || null,
+    action: String(signal.action || '').trim().toLowerCase() || null,
+    score_up_5d: toFiniteNumberOrNull(signal.score_up_5d),
+    expected_ret_5d: toFiniteNumberOrNull(signal.expected_ret_5d),
+    stop_loss: toFiniteNumberOrNull(signal.stop_loss),
+    take_profit: toFiniteNumberOrNull(signal.take_profit),
+    entry_price: toFiniteNumberOrNull(signal.entry_price),
+    position_min: toFiniteNumberOrNull(signal.position_min),
+    position_max: toFiniteNumberOrNull(signal.position_max),
+  }
+}
+const applySymbolToBacktest = (symbol, signal = null) => {
   if (!symbol) return
   const text = String(symbol).trim()
   if (!text) return
   backtestForm.symbols = normalizeSymbolsInputForUi(text)
   backtestForm.market = inferMarketBySymbol(text, market.value || 'SH')
   chartSymbol.value = text
+  predictionSignal.value = normalizePredictionSignal(text, signal)
   activeTab.value = 'strategy'
 }
 const applySymbolToAnalysis = async (symbol) => {
@@ -850,6 +872,7 @@ const {
   chartSymbol,
   selectedOrderKey,
   selectedOrder,
+  predictionSignal,
   showStopLines,
   chartWindow,
   activeTab,
@@ -891,6 +914,10 @@ watch(orderPageSize, () => {
   orderPage.value = 1
 })
 watch(selectedOrder, () => {
+  applyOrderLines()
+})
+watch(predictionSignal, () => {
+  if (klineData.value.length) updateChartData()
   applyOrderLines()
 })
 watch(showStopLines, () => {
@@ -1117,16 +1144,29 @@ const waitForJobDone = async (jobId, timeoutMs = 20 * 60 * 1000, pollMs = 1200) 
   throw new Error(`任务 ${jobId} 超时未完成`)
 }
 function buildMlStockSelectPayload(form) {
+  const rawSymbols = String(form.symbols || '').trim()
+  const isMarketWide = !rawSymbols
+  const marketWideLimitBase = Math.max(3000, Number(form.symbol_eval_limit || 0), Number(form.candidate_limit || 0))
+  const predictionLimit = isMarketWide
+    ? Math.max(marketWideLimitBase, Number(form.prediction_limit || 3000))
+    : Number(form.prediction_limit || 300)
+  const candidateLimit = isMarketWide
+    ? Math.max(marketWideLimitBase, Number(form.candidate_limit || 3000))
+    : Number(form.candidate_limit || 120)
+  const evalLimit = isMarketWide
+    ? Math.max(marketWideLimitBase, Number(form.symbol_eval_limit || candidateLimit))
+    : Number(form.symbol_eval_limit || 120)
   return {
     market: form.market,
     target: form.target || 'y_up_5d',
     model_id: form.model_id || undefined,
-    symbols: form.symbols || undefined,
+    symbols: rawSymbols || undefined,
+    full_market_scan: isMarketWide,
     min_score: Number(form.min_score || 0.55),
-    prediction_limit: Number(form.prediction_limit || 300),
-    candidate_limit: Number(form.candidate_limit || 120),
+    prediction_limit: predictionLimit,
+    candidate_limit: candidateLimit,
     symbol_top_n: Number(form.symbol_top_n || 20),
-    symbol_eval_limit: Number(form.symbol_eval_limit || 120),
+    symbol_eval_limit: evalLimit,
     min_kline_rows: Number(form.min_kline_rows || 120),
     n_folds: backtestForm.n_folds,
     start: backtestForm.start || undefined,
@@ -1196,15 +1236,22 @@ const buildBacktestPayload = () => {
 }
 const buildStockSelectPayload = () => {
   const rawSymbols = String(backtestForm.symbols || '').trim()
-  const fallbackCandidateLimit = Math.max(Number(gridForm.symbol_eval_limit || 120), Number(gridForm.symbol_top_n || 10) * 3)
+  const isMarketWide = !rawSymbols
+  const fallbackCandidateLimit = isMarketWide
+    ? Math.max(Number(gridForm.symbol_eval_limit || 120), 3000)
+    : Math.max(Number(gridForm.symbol_eval_limit || 120), Number(gridForm.symbol_top_n || 10) * 3)
+  const evalLimit = isMarketWide
+    ? Math.max(Number(gridForm.symbol_eval_limit || fallbackCandidateLimit), fallbackCandidateLimit)
+    : Number(gridForm.symbol_eval_limit || 120)
   const effectiveMarket = inferMarketBySymbols(rawSymbols, backtestForm.market)
   backtestForm.market = effectiveMarket
   return {
     market: effectiveMarket,
     symbols: rawSymbols || undefined,
-    all_symbols: !rawSymbols,
+    all_symbols: isMarketWide,
+    full_market_scan: isMarketWide,
     candidate_limit: fallbackCandidateLimit,
-    symbol_eval_limit: Number(gridForm.symbol_eval_limit || 120),
+    symbol_eval_limit: evalLimit,
     symbol_top_n: Number(gridForm.symbol_top_n || 10),
     min_kline_rows: 120,
     n_folds: backtestForm.n_folds,
@@ -1233,8 +1280,28 @@ const runKlUpdate = async () => {
     end: updateForm.end || undefined,
     how: updateForm.how,
     n_jobs: updateForm.n_jobs,
+    source_order: 'akshare,abupy',
+    quick_fail: true,
+    symbol_timeout_sec: 20,
     symbols: symbols || undefined,
     all: !symbols
+  })
+  await store.fetchJob(job.id)
+}
+const runFullAshareUpdate = async () => {
+  await store.importSymbols('CN')
+  const job = await store.startKlUpdate({
+    market: 'CN',
+    n_folds: updateForm.n_folds,
+    start: updateForm.start || undefined,
+    end: updateForm.end || undefined,
+    how: updateForm.how,
+    n_jobs: updateForm.n_jobs,
+    source_order: 'akshare,abupy',
+    quick_fail: true,
+    symbol_timeout_sec: 20,
+    symbols: undefined,
+    all: true
   })
   await store.fetchJob(job.id)
 }
@@ -1264,6 +1331,17 @@ const runClosedLoop = async () => {
     const picked = topSymbols.slice(0, Math.max(1, Number(gridForm.symbol_top_n || 10)))
     backtestForm.symbols = normalizeSymbolsInputForUi(picked.join(', '))
     chartSymbol.value = picked[0]
+    const firstActionable = Array.isArray(selectResult.actionable_candidates)
+      ? selectResult.actionable_candidates.find((item) => String(item?.symbol || '').trim() === picked[0])
+      : null
+    predictionSignal.value = normalizePredictionSignal(picked[0], {
+      symbol: picked[0],
+      trade_date: selectResult?.summary?.end || null,
+      action: firstActionable?.action || null,
+      stop_loss: firstActionable?.stop_loss,
+      take_profit: firstActionable?.take_profit,
+      entry_price: firstActionable?.last_close
+    })
     const backtestQueued = await store.startBacktest(buildBacktestPayload())
     await waitForJobDone(backtestQueued.id, 90 * 60 * 1000)
     toolForm.market = backtestForm.market

@@ -1,5 +1,6 @@
 ﻿from datetime import date, timedelta
 import re
+import math
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -311,9 +312,12 @@ def _load_candidate_symbols_from_db(db: Session, market: str, limit: int = 500) 
     for item in rows:
         symbol = _normalize_symbol(item.symbol, item.market)
         if symbol:
+            lower = str(symbol).lower()
+            if lower.startswith("sh000") or lower.startswith("sz399"):
+                continue
             normalized.append(symbol)
     deduped = list(dict.fromkeys(normalized))
-    cap = max(20, min(int(limit or 500), 5000))
+    cap = max(20, min(int(limit or 500), 20000))
     return deduped[:cap]
 
 
@@ -327,12 +331,30 @@ def _evaluate_symbols_for_run(
     start,
     end,
     top_n: int = 10,
-    eval_limit: int = 120,
+    eval_limit: Optional[int] = 120,
     progress_cb=None,
 ) -> dict:
-    eval_limit = max(5, min(int(eval_limit), 500))
-    top_n = max(1, min(int(top_n), 50))
-    candidates = symbols[:eval_limit]
+    top_n = max(1, min(int(top_n), 200))
+    max_eval_cap = 20000
+    if not symbols:
+        return {
+            "evaluated": 0,
+            "available": 0,
+            "truncated": False,
+            "top": [],
+        }
+    if eval_limit is None:
+        effective_eval_limit = len(symbols)
+    else:
+        try:
+            requested_limit = int(eval_limit)
+        except (TypeError, ValueError):
+            requested_limit = len(symbols)
+        if requested_limit <= 0:
+            effective_eval_limit = len(symbols)
+        else:
+            effective_eval_limit = max(5, min(requested_limit, max_eval_cap, len(symbols)))
+    candidates = symbols[:effective_eval_limit]
     rows = []
     for idx, symbol in enumerate(candidates, start=1):
         try:
@@ -460,11 +482,11 @@ def _build_actionable_candidates(
         "激进": "60%~75%",
     }
     action_weight = {
-        "突破买入": 4.0,
-        "回踩观察买入": 3.0,
-        "持有观察": 2.0,
-        "观望": 1.0,
-        "减仓防守": 0.5,
+        "breakout_buy": 4.0,
+        "pullback_buy": 3.0,
+        "hold_watch": 2.0,
+        "wait": 1.0,
+        "reduce_defense": 0.5,
     }
 
     candidates = []
@@ -500,18 +522,23 @@ def _build_actionable_candidates(
 
             if last_close >= resistance * 0.995 and last_close > ma20 > ma60:
                 action = "突破买入"
+                action_code = "breakout_buy"
                 reason = "价格接近或突破 20 日新高，且均线多头。"
             elif last_close > ma60 and abs(last_close - ma20) / max(ma20, 1e-9) <= 0.012:
                 action = "回踩观察买入"
+                action_code = "pullback_buy"
                 reason = "价格贴近 20 日均线且中期趋势仍偏强。"
             elif last_close >= ma20 and ma20 >= ma60:
                 action = "持有观察"
+                action_code = "hold_watch"
                 reason = "趋势仍在，但未出现强突破点。"
             elif last_close < ma60 * 0.985:
                 action = "减仓防守"
+                action_code = "reduce_defense"
                 reason = "价格明显弱于中期均线，优先防守。"
             else:
                 action = "观望"
+                action_code = "wait"
                 reason = "趋势信号不明确。"
 
             if atr and atr > 0:
@@ -523,15 +550,30 @@ def _build_actionable_candidates(
 
             win_rate = float(item.get("win_rate") or 0.0)
             profit_sum = float(item.get("profit_sum") or 0.0)
-            score = action_weight.get(action, 0.0) * 20 + win_rate * 0.9 + profit_sum * 0.001
+            sharpe = float(item.get("sharpe") or 0.0)
+            annual_return = float(item.get("annual_return") or 0.0)
+            max_drawdown = float(item.get("max_drawdown") or 0.0)
+            profit_component = math.log1p(max(0.0, profit_sum)) * 8.0
+            score = (
+                action_weight.get(action_code, 0.0) * 30.0
+                + win_rate * 0.6
+                + sharpe * 25.0
+                + annual_return * 120.0
+                - max_drawdown * 120.0
+                + profit_component
+            )
             candidates.append(
                 {
                     "symbol": symbol,
                     "action": action,
+                    "action_code": action_code,
                     "reason": reason,
                     "position_range": position_map.get(mode, position_map["平衡"]),
                     "win_rate": win_rate,
                     "profit_sum": profit_sum,
+                    "sharpe": sharpe,
+                    "annual_return": annual_return,
+                    "max_drawdown": max_drawdown,
                     "last_close": last_close,
                     "support": support,
                     "resistance": resistance,

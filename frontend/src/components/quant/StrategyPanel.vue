@@ -723,7 +723,7 @@
         </div>
         <div>
           <label class="label">股票评估上限</label>
-          <input v-model.number="gridForm.symbol_eval_limit" type="number" min="10" max="500" />
+          <input v-model.number="gridForm.symbol_eval_limit" type="number" min="10" max="20000" />
         </div>
         <div v-if="!gridUseBacktestBaseProxy">
           <label class="label">回溯年数</label>

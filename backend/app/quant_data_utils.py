@@ -173,7 +173,7 @@ def _market_from_symbol(symbol: str) -> str:
         return "SH"
     if lower.startswith("sz"):
         code = symbol[2:]
-        return "300" if code.startswith("3") else "SZ"
+        return "300" if code.startswith("30") else "SZ"
     if lower.startswith("hk"):
         return "HK"
     if lower.startswith("us"):
@@ -295,37 +295,66 @@ def _fetch_akshare_df(symbol: str, start: Optional[str], end: Optional[str], n_f
     return df.rename(columns=rename_map)
 
 
-def _load_symbol_kl_df(symbol: str, start: Optional[str], end: Optional[str], n_folds: int):
+def _normalize_source_order(source_order=None) -> list[str]:
+    if source_order is None:
+        return ["akshare", "abupy"]
+    if isinstance(source_order, str):
+        items = [item.strip().lower() for item in source_order.split(",") if item.strip()]
+    elif isinstance(source_order, (list, tuple, set)):
+        items = [str(item).strip().lower() for item in source_order if str(item).strip()]
+    else:
+        items = []
+    normalized = []
+    for item in items:
+        if item in {"abupy", "akshare"} and item not in normalized:
+            normalized.append(item)
+    return normalized or ["akshare", "abupy"]
+
+
+def _load_symbol_kl_df(
+    symbol: str,
+    start: Optional[str],
+    end: Optional[str],
+    n_folds: int,
+    *,
+    source_order=None,
+    quick_mode: bool = False,
+):
     from abupy.MarketBu import ABuSymbolPd
 
     try:
         folds = max(1, int(n_folds or 1))
     except Exception:
         folds = 1
-    attempts = [(start, end, folds)]
-    if start or end:
-        attempts.append((None, None, max(2, folds)))
-
-    errors = []
-    for start_value, end_value, folds_value in attempts:
-        try:
-            df = ABuSymbolPd.make_kl_df(symbol, n_folds=folds_value, start=start_value, end=end_value)
-        except Exception as exc:
-            errors.append(f"abupy(start={start_value},end={end_value}): {exc}")
-            continue
-        if df is not None and not getattr(df, "empty", False):
-            return df
-
     market = _market_from_symbol(symbol)
-    if market in CN_MARKETS or market == "CN":
-        try:
-            df = _fetch_akshare_df(symbol, start, end, folds)
-            if df is not None and not getattr(df, "empty", False):
-                if errors:
-                    logger.warning("abupy fetch failed for %s, fallback to akshare succeeded", symbol)
-                return df
-        except Exception as exc:
-            errors.append(f"akshare: {exc}")
+    errors = []
+    for source in _normalize_source_order(source_order):
+        if source == "abupy":
+            attempts = [(start, end, folds)]
+            if not quick_mode and (start or end):
+                attempts.append((None, None, max(2, folds)))
+            for start_value, end_value, folds_value in attempts:
+                try:
+                    df = ABuSymbolPd.make_kl_df(symbol, n_folds=folds_value, start=start_value, end=end_value)
+                except Exception as exc:
+                    errors.append(f"abupy(start={start_value},end={end_value}): {exc}")
+                    continue
+                if df is not None and not getattr(df, "empty", False):
+                    return df
+        elif source == "akshare":
+            if market not in CN_MARKETS and market != "CN":
+                continue
+            attempts = [(start, end, folds)]
+            if not quick_mode and (start or end):
+                attempts.append((None, None, max(2, folds)))
+            for start_value, end_value, folds_value in attempts:
+                try:
+                    df = _fetch_akshare_df(symbol, start_value, end_value, folds_value)
+                except Exception as exc:
+                    errors.append(f"akshare(start={start_value},end={end_value}): {exc}")
+                    continue
+                if df is not None and not getattr(df, "empty", False):
+                    return df
 
     if errors:
         logger.warning("kline fetch failed for %s: %s", symbol, errors[-1])
@@ -566,7 +595,7 @@ def _build_symbol_rows(market: str) -> list[dict]:
             continue
         row_market = (row.get("market") or "").strip().upper()
         market_value = row_market or target_market
-        if row_market == "SZ" and symbol.startswith("3"):
+        if row_market == "SZ" and symbol.startswith("30"):
             market_value = "300"
         if target_market in CN_MARKETS or target_market == "CN":
             if target_market in CN_MARKETS and market_value != target_market:
@@ -657,7 +686,7 @@ def _akshare_symbol_row(code: str) -> Optional[dict]:
         name = name.strip() or None
     if isinstance(industry, str):
         industry = industry.strip() or None
-    market_value = "300" if code.startswith("3") else "SZ"
+    market_value = "300" if code.startswith("30") else "SZ"
     return {
         "market": market_value,
         "symbol": f"sz{code}",

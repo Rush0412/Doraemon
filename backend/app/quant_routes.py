@@ -124,11 +124,26 @@ def promote_ml_model(model_id: int, db: Session = Depends(get_db)):
 @quant_router.get("/ml/predictions", response_model=schemas.APIResponse)
 def list_ml_predictions(
     market: str = "CN",
+    target: str = "y_up_5d",
     model_id: Optional[int] = None,
     limit: int = 100,
+    actions: Optional[str] = None,
+    recommended_only: bool = True,
+    unique_symbols: bool = True,
+    include_indices: bool = False,
     db: Session = Depends(get_db),
 ):
-    return service.list_ml_predictions(db, market=market, model_id=model_id, limit=limit)
+    return service.list_ml_predictions(
+        db,
+        market=market,
+        target=target,
+        model_id=model_id,
+        limit=limit,
+        actions=actions,
+        recommended_only=recommended_only,
+        unique_symbols=unique_symbols,
+        include_indices=include_indices,
+    )
 
 
 @quant_router.get("/verify", response_model=schemas.APIResponse)
