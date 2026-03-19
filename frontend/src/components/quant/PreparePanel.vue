@@ -179,9 +179,21 @@
             <option value="main">main</option>
           </select>
         </div>
+        <div>
+          <label class="label">补全策略</label>
+          <select v-model="updateForm.coverage_mode" class="select">
+            <option value="below_min_rows">低覆盖优先</option>
+            <option value="missing">仅缺失K线</option>
+          </select>
+        </div>
+        <div>
+          <label class="label">最低K线根数</label>
+          <input v-model.number="updateForm.min_kline_rows" type="number" min="1" max="5000" />
+        </div>
       </div>
       <div class="toolbar">
         <button class="btn-primary" @click="runKlUpdate" :disabled="actionsBusy">启动更新</button>
+        <button class="btn-secondary" @click="runMarketCoverageUpdate" :disabled="actionsBusy">补全当前市场低覆盖K线</button>
         <button class="btn-secondary" @click="runFullAshareUpdate" :disabled="actionsBusy">一键补全A股K线</button>
         <span class="muted">将创建异步任务</span>
       </div>
@@ -265,6 +277,7 @@ defineProps({
   changePage: Function,
   applyPageSize: Function,
   runKlUpdate: Function,
+  runMarketCoverageUpdate: Function,
   runFullAshareUpdate: Function
 })
 

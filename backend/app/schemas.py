@@ -53,6 +53,8 @@ class KlineUpdatePayload(QuantPayloadBase):
     n_jobs: int = Field(default=8, ge=1, le=64)
     how: str = "thread"
     all: bool = False
+    coverage_mode: Optional[str] = "all"
+    min_kline_rows: Optional[int] = Field(default=120, ge=1, le=5000)
 
 
 class BacktestPayload(QuantPayloadBase):
@@ -119,7 +121,7 @@ class MLTrainPayload(BaseModel):
 class MLFeaturePayload(QuantPayloadBase):
     feature_version: str = "v1"
     min_rows: int = Field(default=120, ge=30, le=3000)
-    symbol_limit: int = Field(default=300, ge=10, le=10000)
+    symbol_limit: int = Field(default=10000, ge=10, le=50000)
 
 
 class JobBatchDeletePayload(BaseModel):

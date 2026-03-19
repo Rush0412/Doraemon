@@ -25,20 +25,33 @@ def list_ml_models(
     target: str = "y_up_5d",
     limit: int = 100,
 ):
-    rows = crud.list_ml_models(db, market=market, target=target, limit=limit)
-    recommended_id = None
-    try:
-        recommended = resolve_best_ml_model(
-            db,
-            market=market,
-            target=target,
-            require_market_scope=True,
-            min_symbol_count=recommended_market_model_min_symbol_count(db, market),
-            allow_fallback_to_best=True,
-        )
-        recommended_id = int(recommended.id)
-    except Exception:
-        recommended_id = None
+    request_market = str(market or "CN").strip().upper()
+    rows = crud.list_ml_models(
+        db,
+        market=request_market,
+        target=target,
+        limit=limit,
+        expand_market_scope=True,
+    )
+    request_markets = crud.ml_market_scope(request_market)
+    min_symbol_count_required_by_market = {
+        item_market: recommended_market_model_min_symbol_count(db, item_market)
+        for item_market in request_markets
+    }
+    recommended_ids = set()
+    for item_market in request_markets:
+        try:
+            recommended = resolve_best_ml_model(
+                db,
+                market=item_market,
+                target=target,
+                require_market_scope=True,
+                min_symbol_count=min_symbol_count_required_by_market.get(item_market, 0),
+                allow_fallback_to_best=True,
+            )
+            recommended_ids.add(int(recommended.id))
+        except Exception:
+            continue
     data = [
         {
             "id": item.id,
@@ -52,7 +65,20 @@ def list_ml_models(
             "params": item.params or {},
             "scope": ml_model_scope(item),
             "symbol_count": ml_model_symbol_count(item),
-            "is_recommended": bool(recommended_id and int(item.id) == recommended_id),
+            "min_symbol_count_required": int(
+                min_symbol_count_required_by_market.get(str(item.market or "").strip().upper(), 0)
+            ),
+            "is_qualified_market_model": bool(
+                ml_model_scope(item) == "market"
+                and (ml_model_symbol_count(item) or 0)
+                >= int(
+                    min_symbol_count_required_by_market.get(
+                        str(item.market or "").strip().upper(),
+                        0,
+                    )
+                )
+            ),
+            "is_recommended": bool(int(item.id) in recommended_ids),
             "status": item.status,
             "is_active": bool(item.is_active),
             "artifact_available": model_artifact_available(item),

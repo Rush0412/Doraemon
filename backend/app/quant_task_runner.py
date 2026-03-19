@@ -1,5 +1,5 @@
 ﻿from . import crud
-from .database import SessionLocal
+from .database import SessionLocal, ensure_database_schema
 from .quant_analysis_service import _run_analysis_job
 from .quant_ml_pipeline import run_ml_feature_job, run_ml_predict_job, run_ml_train_job
 from .quant_ml_stock_select import run_ml_stock_select_job
@@ -12,6 +12,7 @@ from .quant_base import *
 def _run_job(job_id: int):
     db = SessionLocal()
     try:
+        ensure_database_schema()
         job = crud.get_quant_job(db, job_id)
         if not job:
             return
@@ -22,6 +23,13 @@ def _run_job(job_id: int):
         if job.type == "kl_update":
             market = (job.params.get("market") or "CN").upper()
             market_repair = None
+            coverage_mode = str(job.params.get("coverage_mode") or "all").strip().lower()
+            if coverage_mode not in {"all", "missing", "below_min_rows"}:
+                coverage_mode = "all"
+            try:
+                min_kline_rows = max(1, min(int(job.params.get("min_kline_rows", 120) or 120), 5000))
+            except Exception:
+                min_kline_rows = 120
             if market in {"CN", "SZ", "300", "ALL", "A"}:
                 try:
                     market_repair = crud.repair_cn_market_mislabels(db)
@@ -30,6 +38,7 @@ def _run_job(job_id: int):
             raw_symbols = job.params.get("symbols")
             symbols = _normalize_symbols(raw_symbols, market)
             seeded = 0
+            prefilter_symbol_count = 0
             if job.params.get("all"):
                 seeded = _seed_symbols_if_empty(db, market)
                 market_keys = _market_scope(market)
@@ -38,6 +47,15 @@ def _run_job(job_id: int):
                     for item in crud.list_stock_symbols_by_markets(db, market_keys)
                 ]
                 symbols = [item for item in symbols if item]
+                prefilter_symbol_count = len(symbols)
+                if coverage_mode != "all":
+                    threshold = 1 if coverage_mode == "missing" else min_kline_rows
+                    symbols = crud.list_symbols_below_kline_threshold(
+                        db,
+                        market_keys,
+                        min_rows=threshold,
+                        limit=50000,
+                    )
             symbols = list(dict.fromkeys([str(item).strip() for item in symbols if str(item).strip()]))
             symbol_limit_raw = job.params.get("symbol_limit")
             if symbol_limit_raw is not None:
@@ -46,6 +64,26 @@ def _run_job(job_id: int):
                     symbols = symbols[:symbol_limit]
                 except Exception:
                     pass
+            if not symbols and job.params.get("all") and coverage_mode != "all":
+                crud.set_quant_job_result(
+                    db,
+                    job,
+                    {
+                        "message": "kl_update skipped: no symbols matched coverage filter",
+                        "market": market,
+                        "coverage_mode": coverage_mode,
+                        "min_kline_rows": min_kline_rows,
+                        "prefilter_symbols_count": int(prefilter_symbol_count),
+                        "symbols_count": 0,
+                        "rows": 0,
+                        "seeded_symbols": seeded,
+                        "updated_symbols": 0,
+                        "missing_symbols_count": 0,
+                        "timed_out_symbols_count": 0,
+                        "market_repair": market_repair,
+                    },
+                )
+                return
             if not symbols:
                 raise RuntimeError("No symbols available; import symbols into database first.")
 
@@ -163,6 +201,9 @@ def _run_job(job_id: int):
                     "source_order": source_order,
                     "quick_fail": quick_fail,
                     "symbol_timeout_sec": symbol_timeout_sec,
+                    "coverage_mode": coverage_mode,
+                    "min_kline_rows": min_kline_rows,
+                    "prefilter_symbols_count": int(prefilter_symbol_count),
                     "symbols_count": total_symbols,
                     "symbols": symbols_preview,
                     "symbols_truncated": bool(total_symbols > len(symbols_preview)),
@@ -851,16 +892,29 @@ def _run_job(job_id: int):
                     "platform": platform.platform(),
                     "abupy_version": abupy_version,
                     "abupy_import_error": import_error,
+                    "data_health": crud.summarize_market_data_health(
+                        db,
+                        market="CN",
+                        target="y_up_5d",
+                        min_rows=120,
+                    ),
                 },
             )
             return
 
         raise RuntimeError("Unsupported job type")
     except Exception as exc:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         logger.exception("Job %s failed", job_id)
-        job = crud.get_quant_job(db, job_id)
-        if job:
-            crud.set_quant_job_error(db, job, str(exc))
+        try:
+            job = crud.get_quant_job(db, job_id)
+            if job:
+                crud.set_quant_job_error(db, job, str(exc))
+        except Exception:
+            logger.exception("Job %s failed while persisting terminal error state", job_id)
     finally:
         db.close()
 

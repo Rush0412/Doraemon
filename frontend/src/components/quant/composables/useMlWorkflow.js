@@ -11,13 +11,14 @@ export function useMlWorkflow({
   buildMlStockSelectPayload
 }) {
   const mlRunning = ref(false)
+  const modelSelectionByContext = reactive({})
 
   const mlFeatureForm = reactive({
     market: market.value,
     symbols: '',
     feature_version: 'v1',
     min_rows: 120,
-    symbol_limit: 300,
+    symbol_limit: 10000,
     start: '',
     end: ''
   })
@@ -79,8 +80,6 @@ export function useMlWorkflow({
     mlTrainForm.market = val
     mlPredictForm.market = val
     mlSelectForm.market = val
-    mlPredictForm.model_id = null
-    mlSelectForm.model_id = null
   })
 
   const refreshMlData = async () => {
@@ -109,6 +108,70 @@ export function useMlWorkflow({
     mlSelectForm.market = nextMarket
   }
 
+  const modelContextKey = (marketValue, targetValue) => {
+    const marketText = String(marketValue || '').trim().toUpperCase() || 'CN'
+    const targetText = String(targetValue || 'y_up_5d').trim() || 'y_up_5d'
+    return `${marketText}::${targetText}`
+  }
+
+  const findModelById = (modelId) => {
+    const id = Number(modelId)
+    if (!Number.isFinite(id) || id <= 0) return null
+    return (store.mlModels || []).find((item) => Number(item?.id) === id) || null
+  }
+
+  const isModelCompatibleWithContext = (model, marketValue, targetValue) => {
+    if (!model?.id) return false
+    const requestMarket = String(marketValue || '').trim().toUpperCase() || 'CN'
+    const requestTarget = String(targetValue || 'y_up_5d').trim() || 'y_up_5d'
+    if (requestMarket === 'CN') return false
+    return (
+      String(model.market || '').trim().toUpperCase() === requestMarket &&
+      String(model.target || '').trim() === requestTarget
+    )
+  }
+
+  const rememberModelSelection = (modelId, marketValue, targetValue) => {
+    const model = findModelById(modelId)
+    if (!isModelCompatibleWithContext(model, marketValue, targetValue)) return
+    modelSelectionByContext[modelContextKey(marketValue, targetValue)] = Number(model.id)
+  }
+
+  const restoreModelSelection = (form) => {
+    const requestMarket = String(form?.market || '').trim().toUpperCase() || 'CN'
+    if (requestMarket === 'CN') {
+      form.model_id = null
+      return
+    }
+    const key = modelContextKey(form?.market, form?.target)
+    const rememberedId = Number(modelSelectionByContext[key])
+    const rememberedModel = findModelById(rememberedId)
+    if (isModelCompatibleWithContext(rememberedModel, form?.market, form?.target)) {
+      form.model_id = rememberedId
+      return
+    }
+    form.model_id = null
+  }
+
+  const sanitizeModelIdForRequest = ({ modelId, marketValue, targetValue, allowCompositeAuto = false }) => {
+    const requestMarket = String(marketValue || '').trim().toUpperCase() || 'CN'
+    if (allowCompositeAuto && requestMarket === 'CN') return undefined
+    const numericId = Number(modelId)
+    if (!Number.isFinite(numericId) || numericId <= 0) return undefined
+    const model = findModelById(numericId)
+    if (!isModelCompatibleWithContext(model, requestMarket, targetValue)) return undefined
+    rememberModelSelection(numericId, requestMarket, targetValue)
+    return numericId
+  }
+
+  watch([() => mlPredictForm.market, () => mlPredictForm.target], () => {
+    restoreModelSelection(mlPredictForm)
+  })
+
+  watch([() => mlSelectForm.market, () => mlSelectForm.target], () => {
+    restoreModelSelection(mlSelectForm)
+  })
+
   const buildMlFeaturePayload = () => {
     const effectiveMarket = inferMarketBySymbols(mlFeatureForm.symbols, mlFeatureForm.market)
     mlFeatureForm.market = effectiveMarket
@@ -117,7 +180,7 @@ export function useMlWorkflow({
       symbols: mlFeatureForm.symbols || undefined,
       feature_version: mlFeatureForm.feature_version || 'v1',
       min_rows: Number(mlFeatureForm.min_rows || 120),
-      symbol_limit: Number(mlFeatureForm.symbol_limit || 300),
+      symbol_limit: Number(mlFeatureForm.symbol_limit || 10000),
       start: mlFeatureForm.start || undefined,
       end: mlFeatureForm.end || undefined
     }
@@ -140,11 +203,17 @@ export function useMlWorkflow({
   const buildMlPredictPayload = () => {
     const effectiveMarket = inferMarketBySymbols(mlPredictForm.symbols, mlPredictForm.market)
     mlPredictForm.market = effectiveMarket
-    const modelId = Number(mlPredictForm.model_id)
+    const modelId = sanitizeModelIdForRequest({
+      modelId: mlPredictForm.model_id,
+      marketValue: effectiveMarket,
+      targetValue: mlPredictForm.target,
+      allowCompositeAuto: true
+    })
+    if (!modelId) mlPredictForm.model_id = null
     return {
       market: effectiveMarket,
       target: mlPredictForm.target || 'y_up_5d',
-      model_id: Number.isFinite(modelId) && modelId > 0 ? modelId : undefined,
+      model_id: modelId,
       symbols: mlPredictForm.symbols || undefined,
       limit: Number(mlPredictForm.limit || 20)
     }
@@ -183,9 +252,17 @@ export function useMlWorkflow({
           }
     const effectiveMarket = inferMarketBySymbols(basePayload.symbols, basePayload.market || mlSelectForm.market)
     mlSelectForm.market = effectiveMarket
+    const modelId = sanitizeModelIdForRequest({
+      modelId: basePayload.model_id,
+      marketValue: effectiveMarket,
+      targetValue: basePayload.target,
+      allowCompositeAuto: true
+    })
+    if (!modelId) mlSelectForm.model_id = null
     return {
       ...basePayload,
-      market: effectiveMarket
+      market: effectiveMarket,
+      model_id: modelId
     }
   }
 
@@ -209,6 +286,7 @@ export function useMlWorkflow({
       if (Number.isFinite(trainedModelId) && trainedModelId > 0) {
         mlPredictForm.model_id = trainedModelId
         mlSelectForm.model_id = trainedModelId
+        rememberModelSelection(trainedModelId, mlTrainForm.market, mlTrainForm.target)
       }
       await refreshMlData()
     } finally {
@@ -259,15 +337,14 @@ export function useMlWorkflow({
   }
 
   const isUsableMarketModel = (model) => {
-    const scope = String(model?.scope || '').trim().toLowerCase()
-    const symbolCount = Number(model?.symbol_count || 0)
-    return scope === 'market' && Number.isFinite(symbolCount) && symbolCount >= 10
+    return Boolean(model?.is_qualified_market_model)
   }
 
   const pickRecommendedModel = () => {
     const rows = Array.isArray(store.mlModels) ? store.mlModels : []
     const exactMarket = String(mlSelectForm.market || mlTrainForm.market || '').trim().toUpperCase()
     const exactTarget = String(mlSelectForm.target || mlTrainForm.target || 'y_up_5d').trim()
+    if (exactMarket === 'CN') return null
     const eligible = rows.filter((item) => {
       return (
         String(item?.market || '').trim().toUpperCase() === exactMarket &&
@@ -295,17 +372,25 @@ export function useMlWorkflow({
   }
 
   const syncRecommendedModelSelection = () => {
-    const recommended = pickRecommendedModel()
-    if (!recommended?.id) return
     const currentPredictId = Number(mlPredictForm.model_id)
     const currentSelectId = Number(mlSelectForm.model_id)
     const currentPredict = (store.mlModels || []).find((item) => Number(item?.id) === currentPredictId)
     const currentSelect = (store.mlModels || []).find((item) => Number(item?.id) === currentSelectId)
-    if (!Number.isFinite(currentPredictId) || !isUsableMarketModel(currentPredict)) {
-      mlPredictForm.model_id = Number(recommended.id)
+    if (!Number.isFinite(currentPredictId) || !isModelCompatibleWithContext(currentPredict, mlPredictForm.market, mlPredictForm.target)) {
+      restoreModelSelection(mlPredictForm)
     }
-    if (!Number.isFinite(currentSelectId) || !isUsableMarketModel(currentSelect)) {
+    if (!Number.isFinite(currentSelectId) || !isModelCompatibleWithContext(currentSelect, mlSelectForm.market, mlSelectForm.target)) {
+      restoreModelSelection(mlSelectForm)
+    }
+    const recommended = pickRecommendedModel()
+    if (!recommended?.id) return
+    if (!mlPredictForm.model_id) {
+      mlPredictForm.model_id = Number(recommended.id)
+      rememberModelSelection(recommended.id, mlPredictForm.market, mlPredictForm.target)
+    }
+    if (!mlSelectForm.model_id) {
       mlSelectForm.model_id = Number(recommended.id)
+      rememberModelSelection(recommended.id, mlSelectForm.market, mlSelectForm.target)
     }
   }
 
@@ -319,6 +404,7 @@ export function useMlWorkflow({
     mlSelectForm.target = nextTarget
     mlPredictForm.model_id = Number(model.id)
     mlSelectForm.model_id = Number(model.id)
+    rememberModelSelection(model.id, nextMarket, nextTarget)
   }
 
   const runMarketModelPipeline = async (nextMarket = mlTrainForm.market) => {
@@ -339,10 +425,36 @@ export function useMlWorkflow({
 
   const promoteMlModel = async (modelId) => {
     if (!modelId) return
-    await store.promoteMlModel(modelId)
+    const promoted = await store.promoteMlModel(modelId)
+    const nextMarket = String(promoted?.market || mlPredictForm.market || '').trim().toUpperCase()
+    const nextTarget = String(promoted?.target || mlPredictForm.target || 'y_up_5d').trim()
+    if (nextMarket) setMlMarket(nextMarket)
+    mlPredictForm.target = nextTarget
+    mlSelectForm.target = nextTarget
     mlPredictForm.model_id = Number(modelId)
     mlSelectForm.model_id = Number(modelId)
+    rememberModelSelection(modelId, nextMarket, nextTarget)
     await refreshMlData()
+  }
+
+  const loadModelTrainingParams = (model) => {
+    if (!model?.id) return
+    const params = model.params || {}
+    const nextMarket = String(model.market || '').trim().toUpperCase()
+    const nextTarget = String(model.target || '').trim() || 'y_up_5d'
+    if (nextMarket) setMlMarket(nextMarket)
+    mlTrainForm.market = nextMarket || mlTrainForm.market
+    mlTrainForm.target = nextTarget
+    mlTrainForm.feature_version = model.feature_version || mlTrainForm.feature_version
+    mlTrainForm.model_name = model.name || mlTrainForm.model_name
+    if (params.train_ratio != null) mlTrainForm.train_ratio = Number(params.train_ratio)
+    if (params.max_samples != null) mlTrainForm.max_samples = Number(params.max_samples)
+    if (params.max_iter != null) mlTrainForm.max_iter = Number(params.max_iter)
+    if (params.learning_rate != null) mlTrainForm.learning_rate = Number(params.learning_rate)
+    if (params.max_depth != null) mlTrainForm.max_depth = Number(params.max_depth)
+    if (params.min_samples_leaf != null) mlTrainForm.min_samples_leaf = Number(params.min_samples_leaf)
+    if (params.l2_regularization != null) mlTrainForm.l2_regularization = Number(params.l2_regularization)
+    rememberModelSelection(model.id, nextMarket, nextTarget)
   }
 
   const numberOrNull = (value) => {
@@ -411,6 +523,7 @@ export function useMlWorkflow({
     runMarketModelPipeline,
     useMlModel,
     promoteMlModel,
+    loadModelTrainingParams,
     applyPredictionToBacktest,
     applyPredictionToPool,
     syncSymbols

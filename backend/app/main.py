@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .config import get_settings
-from .database import Base, engine
+from .database import ensure_database_schema
 from .job_runtime import cleanup_stale_jobs
 from .routes import router
 from .schemas import APIResponse
@@ -27,7 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger("doraemon")
 
 if settings.auto_create_tables:
-    Base.metadata.create_all(bind=engine)
+    ensure_database_schema()
     try:
         expired = cleanup_stale_jobs()
         if expired:

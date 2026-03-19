@@ -97,6 +97,7 @@
       :change-page="changePage"
       :apply-page-size="applyPageSize"
       :run-kl-update="runKlUpdate"
+      :run-market-coverage-update="runMarketCoverageUpdate"
       :run-full-ashare-update="runFullAshareUpdate"
     />
     <StrategyPanel
@@ -213,6 +214,7 @@
       :refresh-ml-data="refreshMlData"
       :use-ml-model="useMlModel"
       :promote-ml-model="promoteMlModel"
+      :load-model-training-params="loadModelTrainingParams"
       :apply-prediction-to-backtest="applyPredictionToBacktest"
       :apply-prediction-to-pool="applyPredictionToPool"
     />
@@ -353,7 +355,9 @@ const updateForm = reactive({
   end: '',
   n_jobs: 8,
   how: 'thread',
-  symbols: ''
+  symbols: '',
+  coverage_mode: 'below_min_rows',
+  min_kline_rows: 120
 })
 const backtestForm = reactive({
   market: market.value,
@@ -869,6 +873,7 @@ const {
   filteredOrders,
   analysisResult,
   analysisOverlayEnabled,
+  operationSuggestion,
   chartSymbol,
   selectedOrderKey,
   selectedOrder,
@@ -1200,6 +1205,7 @@ const {
   runMarketModelPipeline,
   useMlModel,
   promoteMlModel,
+  loadModelTrainingParams,
   applyPredictionToBacktest,
   applyPredictionToPool,
   syncSymbols: syncMlSymbols
@@ -1283,8 +1289,29 @@ const runKlUpdate = async () => {
     source_order: 'akshare,abupy',
     quick_fail: true,
     symbol_timeout_sec: 20,
+    coverage_mode: 'all',
+    min_kline_rows: updateForm.min_kline_rows,
     symbols: symbols || undefined,
     all: !symbols
+  })
+  await store.fetchJob(job.id)
+}
+const runMarketCoverageUpdate = async () => {
+  await store.importSymbols(updateForm.market || market.value || 'CN')
+  const job = await store.startKlUpdate({
+    market: updateForm.market,
+    n_folds: updateForm.n_folds,
+    start: updateForm.start || undefined,
+    end: updateForm.end || undefined,
+    how: updateForm.how,
+    n_jobs: updateForm.n_jobs,
+    source_order: 'akshare,abupy',
+    quick_fail: true,
+    symbol_timeout_sec: 20,
+    coverage_mode: updateForm.coverage_mode || 'below_min_rows',
+    min_kline_rows: updateForm.min_kline_rows,
+    symbols: undefined,
+    all: true
   })
   await store.fetchJob(job.id)
 }
@@ -1300,6 +1327,8 @@ const runFullAshareUpdate = async () => {
     source_order: 'akshare,abupy',
     quick_fail: true,
     symbol_timeout_sec: 20,
+    coverage_mode: 'all',
+    min_kline_rows: updateForm.min_kline_rows,
     symbols: undefined,
     all: true
   })

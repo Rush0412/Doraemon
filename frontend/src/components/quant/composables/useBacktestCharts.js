@@ -19,6 +19,7 @@ export const useBacktestCharts = ({
   filteredOrders,
   analysisResult,
   analysisOverlayEnabled,
+  operationSuggestion,
   chartSymbol,
   selectedOrderKey,
   selectedOrder,
@@ -42,6 +43,7 @@ export const useBacktestCharts = ({
   const klineLoading = ref(false)
   const klineError = ref('')
   const hoverInfo = ref(null)
+  const latestKlineRequestId = ref(0)
 
   const setKlineContainer = (el) => {
     klineContainer.value = el
@@ -131,6 +133,17 @@ export const useBacktestCharts = ({
     const dir = Number.isFinite(direction) ? direction : 1
     if (Number.isFinite(buy) && Number.isFinite(sell)) return (sell - buy) * size * dir
     return 0
+  }
+
+  const getValidChartOrders = () => {
+    const rows = Array.isArray(chartOrdersAll.value) ? chartOrdersAll.value : []
+    return rows.filter((item) => item && typeof item === 'object')
+  }
+
+  const resolveChartOverlayMode = () => {
+    if (selectedOrder.value && typeof selectedOrder.value === 'object') return 'selected-order'
+    if (getValidChartOrders().length) return 'orders-overview'
+    return 'signal-only'
   }
 
   const applyVisibleRange = () => {
@@ -287,6 +300,45 @@ export const useBacktestCharts = ({
     return signal
   }
 
+  const buildAdviceForChart = () => {
+    const advice = operationSuggestion?.value
+    if (!advice || typeof advice !== 'object' || !klineData.value.length) return null
+    const signal = buildSignalForChart()
+    if (signal?.symbol && chartSymbol.value && !symbolEquals(signal.symbol, chartSymbol.value)) return null
+    const latestRow = klineData.value[klineData.value.length - 1] || null
+    const adviceDateInt = toDateInt(signal?.trade_date) || toDateInt(latestRow?.date)
+    const adviceTime = toChartTime(adviceDateInt)
+    if (!adviceTime) return null
+    const lastClose = Number(advice.lastClose)
+    const support = Number(advice.support)
+    const resistance = Number(advice.resistance)
+    const stopLoss = Number(advice.stopLoss ?? signal?.stop_loss)
+    const takeProfit = Number(advice.takeProfit ?? signal?.take_profit)
+    const entryPrice = Number(signal?.entry_price ?? lastClose)
+    const takeProfitPlan = Array.isArray(advice.takeProfitPlan) ? advice.takeProfitPlan : []
+    const direction = String(advice.direction || signal?.action || '').trim().toLowerCase()
+    const isBuySide = ['buy', 'buy_watch', 'light_buy'].includes(direction)
+    const isSellSide = ['sell', 'reduce', 'avoid'].includes(direction)
+    return {
+      adviceTime,
+      adviceDateInt,
+      direction,
+      isBuySide,
+      isSellSide,
+      entryPrice: Number.isFinite(entryPrice) && entryPrice > 0 ? entryPrice : null,
+      support: Number.isFinite(support) && support > 0 ? support : null,
+      resistance: Number.isFinite(resistance) && resistance > 0 ? resistance : null,
+      stopLoss: Number.isFinite(stopLoss) && stopLoss > 0 ? stopLoss : null,
+      takeProfit: Number.isFinite(takeProfit) && takeProfit > 0 ? takeProfit : null,
+      takeProfitPlan: takeProfitPlan
+        .map((item) => ({
+          label: String(item?.label || '').trim(),
+          target: Number(item?.target)
+        }))
+        .filter((item) => item.label && Number.isFinite(item.target) && item.target > 0)
+    }
+  }
+
   const resolveSignalEvent = () => {
     const signal = buildSignalForChart()
     if (!signal || !klineData.value.length) return null
@@ -340,6 +392,7 @@ export const useBacktestCharts = ({
   }
 
   const buildPredictionMarkers = (minDate, maxDate) => {
+    if (resolveChartOverlayMode() !== 'signal-only') return []
     const event = resolveSignalEvent()
     if (!event) return []
     const markers = []
@@ -349,7 +402,7 @@ export const useBacktestCharts = ({
         position: 'belowBar',
         color: '#2f6fdd',
         shape: 'circle',
-        text: `SIG BUY ${formatNumber(event.entryPrice)}`
+        text: `信号买入 ${formatNumber(event.entryPrice)}`
       })
     }
     const trigger = event.sellTrigger
@@ -360,14 +413,58 @@ export const useBacktestCharts = ({
         position: 'aboveBar',
         color: isStop ? '#b33a3a' : '#1f7a4b',
         shape: 'arrowDown',
-        text: `${isStop ? 'SIG SL' : 'SIG TP'} ${formatNumber(trigger.price)}`
+        text: `${isStop ? '信号止损' : '信号止盈'} ${formatNumber(trigger.price)}`
+      })
+    }
+    return markers
+  }
+
+  const buildAdviceMarkers = (minDate, maxDate) => {
+    const advice = buildAdviceForChart()
+    if (!advice?.adviceTime) return []
+    if (minDate && (advice.adviceDateInt < minDate || advice.adviceDateInt > maxDate)) return []
+    const markers = []
+    if (advice.isBuySide && advice.entryPrice) {
+      markers.push({
+        time: advice.adviceTime,
+        position: 'belowBar',
+        color: '#0f766e',
+        shape: 'circle',
+        text: `建议买入 ${formatNumber(advice.entryPrice)}`
+      })
+    }
+    if (advice.isSellSide && advice.entryPrice) {
+      markers.push({
+        time: advice.adviceTime,
+        position: 'aboveBar',
+        color: '#b45309',
+        shape: 'circle',
+        text: `建议卖出 ${formatNumber(advice.entryPrice)}`
+      })
+    }
+    if (advice.takeProfitPlan.length) {
+      const primaryTp = advice.takeProfitPlan[0]
+      markers.push({
+        time: advice.adviceTime,
+        position: 'aboveBar',
+        color: '#1d4ed8',
+        shape: 'square',
+        text: `${primaryTp.label} ${formatNumber(primaryTp.target)}`
+      })
+    } else if (advice.takeProfit) {
+      markers.push({
+        time: advice.adviceTime,
+        position: 'aboveBar',
+        color: '#1d4ed8',
+        shape: 'square',
+        text: `预计止盈 ${formatNumber(advice.takeProfit)}`
       })
     }
     return markers
   }
 
   const buildMarkers = () => {
-    const orders = chartOrdersAll.value || []
+    const orders = getValidChartOrders()
     const maxMarkers = 5000
     const markerOrders = orders.length > maxMarkers ? orders.slice(-maxMarkers) : orders
     const minDate = klineData.value.length ? toDateInt(klineData.value[0]?.date) || 0 : 0
@@ -397,7 +494,7 @@ export const useBacktestCharts = ({
         })
       }
     })
-    return [...markers, ...buildPredictionMarkers(minDate, maxDate)].sort((a, b) =>
+    return [...markers, ...buildPredictionMarkers(minDate, maxDate), ...buildAdviceMarkers(minDate, maxDate)].sort((a, b) =>
       String(a.time).localeCompare(String(b.time))
     )
   }
@@ -421,8 +518,9 @@ export const useBacktestCharts = ({
     clearOrderLines()
     if (!candleSeries.value) return
     const order = selectedOrder.value
+    const overlayMode = resolveChartOverlayMode()
     const lines = []
-    if (!order) {
+    if (overlayMode === 'signal-only') {
       const event = resolveSignalEvent()
       if (event?.entryPrice && Number.isFinite(event.entryPrice)) {
         lines.push(
@@ -432,7 +530,7 @@ export const useBacktestCharts = ({
             lineWidth: 2,
             lineStyle: 0,
             axisLabelVisible: true,
-            title: 'SIG BUY'
+            title: '信号买入'
           })
         )
       }
@@ -444,7 +542,7 @@ export const useBacktestCharts = ({
             lineWidth: 1,
             lineStyle: 2,
             axisLabelVisible: true,
-            title: 'SIG SL'
+            title: '信号止损'
           })
         )
       }
@@ -456,10 +554,57 @@ export const useBacktestCharts = ({
             lineWidth: 1,
             lineStyle: 2,
             axisLabelVisible: true,
-            title: 'SIG TP'
+            title: '信号止盈'
           })
         )
       }
+      orderPriceLines.value = lines
+    }
+    const advice = buildAdviceForChart()
+    if (advice?.entryPrice) {
+      lines.push(
+        candleSeries.value.createPriceLine({
+          price: advice.entryPrice,
+          color: advice.isSellSide ? '#b45309' : '#0f766e',
+          lineWidth: 2,
+          lineStyle: 1,
+          axisLabelVisible: true,
+          title: advice.isSellSide ? '建议卖出' : '建议买入'
+        })
+      )
+    }
+    if (showStopLines.value && advice?.stopLoss) {
+      lines.push(
+        candleSeries.value.createPriceLine({
+          price: advice.stopLoss,
+          color: '#b33a3a',
+          lineWidth: 1,
+          lineStyle: 2,
+          axisLabelVisible: true,
+          title: '建议止损'
+        })
+      )
+    }
+    if (showStopLines.value) {
+      const tpTargets = advice?.takeProfitPlan?.length
+        ? advice.takeProfitPlan.slice(0, 3)
+        : advice?.takeProfit
+          ? [{ label: '止盈', target: advice.takeProfit }]
+          : []
+      tpTargets.forEach((item) => {
+        lines.push(
+          candleSeries.value.createPriceLine({
+            price: item.target,
+            color: '#1d4ed8',
+            lineWidth: 1,
+            lineStyle: 2,
+            axisLabelVisible: true,
+            title: `预计${item.label || '止盈'}`
+          })
+        )
+      })
+    }
+    if (overlayMode !== 'selected-order' || !order || typeof order !== 'object') {
       orderPriceLines.value = lines
       return
     }
@@ -698,19 +843,29 @@ export const useBacktestCharts = ({
       : splitSymbolInput(backtestForm.symbols)
     if (!symbols.length) return
     if (!chartSymbol.value) chartSymbol.value = symbols[0]
+    const requestId = ++latestKlineRequestId.value
+    const requestSymbol = chartSymbol.value
+    const requestMarket = backtestForm.market
     klineLoading.value = true
     klineError.value = ''
     try {
       const { data } = await api.get('/quant/klines', {
         params: {
-          symbol: chartSymbol.value,
-          market: backtestForm.market,
+          symbol: requestSymbol,
+          market: requestMarket,
           start: backtestForm.start || undefined,
           end: backtestForm.end || undefined,
           limit: 2000
         }
       })
+      if (requestId !== latestKlineRequestId.value) return
       const items = data.data?.items || []
+      if (!items.length) {
+        klineData.value = []
+        hoverInfo.value = null
+        updateChartData()
+        throw new Error(`No data for ${requestSymbol}`)
+      }
       klineData.value = items.slice().sort((a, b) => {
         const left = toDateInt(a.date) || 0
         const right = toDateInt(b.date) || 0
@@ -720,8 +875,13 @@ export const useBacktestCharts = ({
       await nextTick()
       updateChartData()
     } catch (err) {
+      if (requestId !== latestKlineRequestId.value) return
+      klineData.value = []
+      hoverInfo.value = null
+      updateChartData()
       klineError.value = err?.message || String(err)
     } finally {
+      if (requestId !== latestKlineRequestId.value) return
       klineLoading.value = false
     }
   }

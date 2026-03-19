@@ -14,12 +14,15 @@ from .quant_backtest_utils import (
 from .quant_core_utils import _params_dict, _validate_strategy_list
 from .quant_data_utils import _market_from_symbol, _parse_date_str, _with_benchmark_fallback, _with_pg_data_env
 from .quant_ml_model_utils import (
+    is_composite_market_request,
     ml_model_scope,
     ml_model_symbol_count,
     market_symbol_universe_count,
     recommended_market_model_min_symbol_count,
     resolve_best_ml_model,
+    resolve_market_model_bundle,
     score_latest_features_for_model,
+    score_latest_features_for_model_bundle,
 )
 
 
@@ -69,7 +72,7 @@ def _effective_quant_eval_limit(*, symbol_eval_limit: int, candidate_count: int,
 
 def _empty_select_result(
     *,
-    model_row,
+    model_summary: dict,
     market: str,
     target: str,
     prediction_limit: int,
@@ -83,10 +86,7 @@ def _empty_select_result(
     warning: Optional[str] = None,
 ):
     summary = {
-        "model_id": model_row.id,
-        "model_name": model_row.name,
-        "model_scope": ml_model_scope(model_row),
-        "model_symbol_count": ml_model_symbol_count(model_row),
+        **(model_summary or {}),
         "market": market,
         "target": target,
         "prediction_limit": prediction_limit,
@@ -103,7 +103,7 @@ def _empty_select_result(
         "warning": warning,
     }
     recommendation = {
-        "mode": "观望",
+        "mode": "wait",
         "action": "wait",
         "reason": warning or "No actionable ML + quant candidates found.",
     }
@@ -119,6 +119,42 @@ def _empty_select_result(
     }
 
 
+def _model_summary_from_single(model_row) -> dict:
+    market_key = str(model_row.market or "").strip().upper()
+    symbol_count = ml_model_symbol_count(model_row)
+    return {
+        "model_id": model_row.id,
+        "model_name": model_row.name,
+        "model_scope": ml_model_scope(model_row),
+        "model_symbol_count": symbol_count,
+        "model_ids": {market_key: int(model_row.id)} if market_key else {},
+        "model_names": {market_key: model_row.name} if market_key else {},
+        "model_symbol_counts": {market_key: symbol_count} if market_key else {},
+    }
+
+
+def _model_summary_from_bundle(model_rows_by_market: dict[str, object]) -> dict:
+    model_ids = {}
+    model_names = {}
+    model_symbol_counts = {}
+    total_symbol_count = 0
+    for market_key, model_row in (model_rows_by_market or {}).items():
+        count = int(ml_model_symbol_count(model_row) or 0)
+        model_ids[market_key] = int(model_row.id)
+        model_names[market_key] = model_row.name
+        model_symbol_counts[market_key] = count
+        total_symbol_count += count
+    return {
+        "model_id": None,
+        "model_name": "composite_market_bundle",
+        "model_scope": "composite_market",
+        "model_symbol_count": total_symbol_count or None,
+        "model_ids": model_ids,
+        "model_names": model_names,
+        "model_symbol_counts": model_symbol_counts,
+    }
+
+
 def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[int] = None) -> dict:
     from abupy import abu
 
@@ -126,24 +162,25 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
     target = str(job_params.get("target") or "y_up_5d")
     min_kline_rows = max(60, min(int(job_params.get("min_kline_rows", 120)), 2000))
     raw_symbols = job_params.get("symbols")
-    market_wide_mode = not raw_symbols
     requested_model_id = job_params.get("model_id")
+    requested_symbols = set()
+    if raw_symbols:
+        from .quant_base import _normalize_symbols
+
+        requested_symbols = set(_normalize_symbols(raw_symbols, market, fallback_default=False))
+    market_wide_mode = not requested_symbols
+
+    request_markets = crud.ml_market_scope(market)
     universe_count = market_symbol_universe_count(db, market, min_rows=min_kline_rows)
-    min_market_model_symbols = (
-        recommended_market_model_min_symbol_count(db, market, min_rows=min_kline_rows)
-        if market_wide_mode
-        else 0
-    )
-    model_row = resolve_best_ml_model(
-        db,
-        market=market,
-        target=target,
-        model_id=job_params.get("model_id"),
-        require_market_scope=market_wide_mode,
-        min_symbol_count=min_market_model_symbols,
-        allow_fallback_to_best=bool(market_wide_mode and not requested_model_id),
-        attempt_repair=True,
-    )
+    min_market_model_symbols_by_market = {
+        market_key: (
+            recommended_market_model_min_symbol_count(db, market_key, min_rows=min_kline_rows)
+            if market_wide_mode
+            else 0
+        )
+        for market_key in request_markets
+    }
+    min_market_model_symbols = sum(min_market_model_symbols_by_market.values())
 
     full_market_scan = _as_bool(job_params.get("full_market_scan"), default=market_wide_mode)
     include_indices = _as_bool(job_params.get("include_indices"), default=False)
@@ -170,26 +207,73 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
     _validate_strategy_list([buy_strategy], "buy")
     _validate_strategy_list([sell_strategy], "sell")
 
-    requested_symbols = set()
-    if raw_symbols:
-        from .quant_base import _normalize_symbols
-
-        requested_symbols = set(_normalize_symbols(raw_symbols, market, fallback_default=False))
-    if requested_symbols:
-        full_market_scan = False
-
     scoring_limit = max(prediction_limit, candidate_limit, symbol_eval_limit)
     if market_wide_mode and full_market_scan:
         scoring_limit = max(scoring_limit, universe_count)
-    scoring = score_latest_features_for_model(
-        db,
-        model_row=model_row,
-        market=market,
-        target=target,
-        symbols=raw_symbols,
-        limit=scoring_limit,
-        persist=True,
-    )
+
+    model_warning = None
+    model_errors = {}
+    bundle_mode = bool(is_composite_market_request(market) and not requested_model_id)
+    if is_composite_market_request(market) and requested_model_id:
+        raise RuntimeError(
+            f"Composite market request {market} cannot pin a single model_id={requested_model_id}. "
+            "Clear model_id to use the default SH/SZ/300 market models, or choose a concrete market."
+        )
+    if bundle_mode:
+        model_rows_by_market, model_errors = resolve_market_model_bundle(
+            db,
+            market=market,
+            target=target,
+            require_market_scope=market_wide_mode,
+            min_rows=min_kline_rows,
+            attempt_repair=True,
+        )
+        model_summary = _model_summary_from_bundle(model_rows_by_market)
+        scoring = score_latest_features_for_model_bundle(
+            db,
+            model_rows_by_market=model_rows_by_market,
+            market=market,
+            target=target,
+            symbols=raw_symbols,
+            limit=scoring_limit,
+            persist=True,
+        )
+        if model_errors:
+            model_warning = (
+                "Skipped markets without a qualified model: "
+                + ", ".join(f"{key} ({value})" for key, value in sorted(model_errors.items()))
+            )
+    else:
+        model_row = resolve_best_ml_model(
+            db,
+            market=market,
+            target=target,
+            model_id=requested_model_id,
+            require_market_scope=market_wide_mode,
+            min_symbol_count=(
+                min_market_model_symbols_by_market.get(market, 0)
+                if market_wide_mode
+                else 0
+            ),
+            allow_fallback_to_best=bool(market_wide_mode and not requested_model_id),
+            attempt_repair=True,
+        )
+        model_summary = _model_summary_from_single(model_row)
+        scoring = score_latest_features_for_model(
+            db,
+            model_row=model_row,
+            market=market,
+            target=target,
+            symbols=raw_symbols,
+            limit=scoring_limit,
+            persist=True,
+        )
+        if requested_model_id and int(requested_model_id) != int(model_row.id):
+            model_warning = (
+                f"Requested model {requested_model_id} is not suitable for market-wide selection; "
+                f"automatically switched to best available market model {model_row.id}."
+            )
+
     prediction_dicts = _sort_prediction_dicts(scoring["predictions"])
     if not prediction_dicts:
         raise RuntimeError("No ML predictions found. Run ml_feature/ml_train first.")
@@ -256,26 +340,28 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
         "filter_warning": filter_warning,
         "rows_scored": scoring["rows_scored"],
         "rows_upserted": scoring["rows_upserted"],
-        "feature_version": scoring["feature_version"],
-        "model_scope": ml_model_scope(model_row),
-        "model_symbol_count": ml_model_symbol_count(model_row),
-        "market_model_ready": bool((ml_model_symbol_count(model_row) or 0) >= min_market_model_symbols),
+        "feature_version": scoring.get("feature_version"),
+        "feature_versions": scoring.get("feature_versions") or {},
+        "model_scope": model_summary.get("model_scope"),
+        "model_symbol_count": model_summary.get("model_symbol_count"),
+        "market_model_ready": bool(model_summary.get("model_ids")) and not bool(model_errors),
         "min_market_model_symbols": min_market_model_symbols,
+        "min_market_model_symbols_by_market": min_market_model_symbols_by_market,
         "market_universe_symbols": universe_count,
         "market_wide_mode": market_wide_mode,
         "full_market_scan": bool(market_wide_mode and full_market_scan),
         "include_indices": include_indices,
         "requested_model_id": requested_model_id,
-        "selected_model_id": model_row.id,
+        "selected_model_id": model_summary.get("model_id"),
+        "selected_model_ids": model_summary.get("model_ids", {}),
+        "models_by_market": scoring.get("models_by_market") or {},
+        "missing_model_markets": sorted(model_errors),
     }
-    if requested_model_id and int(requested_model_id) != int(model_row.id):
-        diagnostics["model_warning"] = (
-            f"Requested model {requested_model_id} is not suitable for market-wide selection; "
-            f"automatically switched to best available market model {model_row.id}."
-        )
+    if model_warning:
+        diagnostics["model_warning"] = model_warning
     if not ml_candidates:
         return _empty_select_result(
-            model_row=model_row,
+            model_summary=model_summary,
             market=market,
             target=target,
             prediction_limit=prediction_limit,
@@ -301,7 +387,7 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
 
     if not available_symbols:
         return _empty_select_result(
-            model_row=model_row,
+            model_summary=model_summary,
             market=market,
             target=target,
             prediction_limit=prediction_limit,
@@ -369,7 +455,7 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
         db=db,
         top_symbols=top_symbols,
         market=market,
-        mode=recommendation.get("mode", "平衡"),
+        mode=recommendation.get("mode", "balanced"),
         limit=symbol_top_n,
     )
 
@@ -407,13 +493,52 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
         ),
         reverse=True,
     )
+    buy_candidate_symbols = {str(item.get("symbol") or "").strip() for item in buy_candidates}
+    candidate_symbols_set = set(candidate_symbols)
+    available_symbols_set = set(available_symbols)
+    missing_symbols_set = set(missing_symbols)
+    top_symbols_map = {str(item.get("symbol") or "").strip(): item for item in top_symbols}
+    actionable_map = {str(item.get("symbol") or "").strip(): item for item in actionable_candidates}
+    excluded_ml_candidates = []
+    for prediction in sorted_predictions[: min(max(candidate_limit, symbol_top_n), 20)]:
+        symbol = str(prediction.get("symbol") or "").strip()
+        if not symbol or symbol in buy_candidate_symbols:
+            continue
+        reason_code = "not_selected"
+        reason_text = "未进入当前联动选股结果。"
+        quant_action = None
+        if symbol not in candidate_symbols_set:
+            reason_code = "outside_eval_scope"
+            reason_text = "ML 排名靠前，但未进入本次量化评估范围。可提高候选池或评估上限。"
+        elif symbol in missing_symbols_set:
+            reason_code = "insufficient_kline"
+            reason_text = "ML 信号较强，但K线不足，未进入量化评估。"
+        elif symbol not in available_symbols_set:
+            reason_code = "quant_data_unavailable"
+            reason_text = "未获得可用量化评估数据。"
+        elif symbol not in top_symbols_map:
+            reason_code = "not_in_quant_top"
+            reason_text = "已通过ML筛选并完成量化评估，但在当前策略下未进入量化 TopN。"
+        elif symbol in actionable_map:
+            quant_action = str(actionable_map[symbol].get("action_code") or "").strip().lower() or None
+            reason_code = f"quant_gate:{quant_action or 'unknown'}"
+            reason_text = str(actionable_map[symbol].get("reason") or "量化动作未达到买入条件。").strip()
+        excluded_ml_candidates.append(
+            {
+                "symbol": symbol,
+                "ml_action": prediction.get("action"),
+                "score_up_5d": prediction.get("score_up_5d"),
+                "expected_ret_5d": prediction.get("expected_ret_5d"),
+                "reason_code": reason_code,
+                "reason": reason_text,
+                "quant_action": actionable_map.get(symbol, {}).get("action") if symbol in actionable_map else None,
+                "quant_action_code": quant_action,
+            }
+        )
 
     summary = {
         **summary_metrics,
-        "model_id": model_row.id,
-        "model_name": model_row.name,
-        "model_scope": ml_model_scope(model_row),
-        "model_symbol_count": ml_model_symbol_count(model_row),
+        **model_summary,
         "target": target,
         "prediction_limit": prediction_limit,
         "candidate_limit": candidate_limit,
@@ -439,5 +564,6 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
         "top_symbols": top_symbols,
         "actionable_candidates": actionable_candidates,
         "buy_candidates": buy_candidates[:symbol_top_n],
+        "excluded_ml_candidates": excluded_ml_candidates,
         "missing_symbols": missing_symbols[:200],
     }

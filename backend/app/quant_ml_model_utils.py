@@ -328,9 +328,9 @@ def ml_model_markets(model_row) -> list[str]:
 def market_symbol_universe_count(db: Session, market: str, *, min_rows: int = 120) -> int:
     rows = crud.list_kline_symbols_by_markets(
         db,
-        [str(market or "CN").strip().upper()],
+        crud.ml_market_scope(market),
         min_rows=min_rows,
-        limit=10000,
+        limit=50000,
     )
     return len(rows)
 
@@ -339,7 +339,61 @@ def recommended_market_model_min_symbol_count(db: Session, market: str, *, min_r
     universe_count = market_symbol_universe_count(db, market, min_rows=min_rows)
     if universe_count <= 0:
         return 10
-    return max(10, min(100, universe_count // 5))
+    baseline = max(10, min(100, universe_count // 5))
+    return min(universe_count, baseline)
+
+
+def _infer_market_from_symbol_text(symbol: str, default_market: str = "CN") -> str:
+    text = str(symbol or "").strip().lower()
+    if text.startswith("sh"):
+        return "SH"
+    if text.startswith("sz3"):
+        return "300"
+    if text.startswith("sz"):
+        return "SZ"
+    return str(default_market or "CN").strip().upper()
+
+
+def is_composite_market_request(market: str) -> bool:
+    return len(crud.ml_market_scope(market)) > 1
+
+
+def resolve_market_model_bundle(
+    db: Session,
+    market: str,
+    target: str = "y_up_5d",
+    *,
+    require_market_scope: bool = True,
+    min_rows: int = 120,
+    attempt_repair: bool = False,
+) -> tuple[dict[str, object], dict[str, str]]:
+    request_markets = crud.ml_market_scope(market)
+    model_rows: dict[str, object] = {}
+    errors: dict[str, str] = {}
+    for market_key in request_markets:
+        try:
+            model_rows[market_key] = resolve_best_ml_model(
+                db,
+                market=market_key,
+                target=target,
+                require_market_scope=require_market_scope,
+                min_symbol_count=(
+                    recommended_market_model_min_symbol_count(db, market_key, min_rows=min_rows)
+                    if require_market_scope
+                    else 0
+                ),
+                allow_fallback_to_best=True,
+                attempt_repair=attempt_repair,
+            )
+        except Exception as exc:
+            errors[market_key] = str(exc)
+    if model_rows:
+        return model_rows, errors
+    detail = "; ".join(f"{key}: {value}" for key, value in errors.items()) or "no market model available"
+    raise RuntimeError(
+        f"No qualified sub-market model available for request market={str(market or 'CN').strip().upper()}, "
+        f"target={str(target or 'y_up_5d').strip()}. {detail}"
+    )
 
 
 def resolve_best_ml_model(
@@ -573,4 +627,97 @@ def score_latest_features_for_model(
         "rows_upserted": rows_upserted,
         "predictions": prediction_rows,
         "top_predictions": scored_rows[: max(1, int(limit or 100))],
+    }
+
+
+def score_latest_features_for_model_bundle(
+    db: Session,
+    model_rows_by_market: dict[str, object],
+    market: str,
+    target: str = "y_up_5d",
+    symbols=None,
+    limit: int = 100,
+    persist: bool = True,
+) -> dict:
+    request_market = str(market or "CN").strip().upper()
+    request_target = str(target or "y_up_5d").strip()
+    normalized_symbols = (
+        _normalize_symbols(symbols, request_market, fallback_default=False) if symbols else None
+    )
+    symbols_by_market: dict[str, list[str]] = {}
+    if normalized_symbols:
+        for item in normalized_symbols:
+            market_key = _infer_market_from_symbol_text(item, request_market)
+            symbols_by_market.setdefault(market_key, []).append(item)
+
+    combined_predictions = []
+    combined_top_predictions = []
+    feature_versions: dict[str, str] = {}
+    rows_scored = 0
+    rows_upserted = 0
+    scored_markets = []
+    for market_key, model_row in model_rows_by_market.items():
+        scoped_symbols = symbols_by_market.get(market_key)
+        if normalized_symbols and not scoped_symbols:
+            continue
+        scoped_limit = max(int(limit or 100), 200)
+        if not scoped_symbols:
+            scoped_limit = max(scoped_limit, market_symbol_universe_count(db, market_key))
+        result = score_latest_features_for_model(
+            db,
+            model_row=model_row,
+            market=market_key,
+            target=request_target,
+            symbols=scoped_symbols,
+            limit=scoped_limit,
+            persist=persist,
+        )
+        feature_versions[market_key] = str(result.get("feature_version") or "")
+        rows_scored += int(result.get("rows_scored") or 0)
+        rows_upserted += int(result.get("rows_upserted") or 0)
+        combined_predictions.extend(result.get("predictions") or [])
+        combined_top_predictions.extend(result.get("top_predictions") or [])
+        scored_markets.append(market_key)
+
+    combined_predictions = sorted(
+        combined_predictions,
+        key=lambda item: (
+            float(item.get("score_up_5d", 0.0) or 0.0),
+            float(item.get("expected_ret_5d", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    combined_top_predictions = sorted(
+        combined_top_predictions,
+        key=lambda item: (
+            float(item.get("score_up_5d", 0.0) or 0.0),
+            float(item.get("expected_ret_5d", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
+    unique_feature_versions = {value for value in feature_versions.values() if value}
+    feature_version = ""
+    if len(unique_feature_versions) == 1:
+        feature_version = next(iter(unique_feature_versions))
+    elif unique_feature_versions:
+        feature_version = "multi"
+
+    return {
+        "feature_version": feature_version,
+        "feature_versions": feature_versions,
+        "rows_scored": rows_scored,
+        "rows_upserted": rows_upserted,
+        "predictions": combined_predictions,
+        "top_predictions": combined_top_predictions[: max(1, int(limit or 100))],
+        "markets_scored": scored_markets,
+        "models_by_market": {
+            market_key: {
+                "id": getattr(model_row, "id", None),
+                "name": getattr(model_row, "name", None),
+                "market": getattr(model_row, "market", None),
+                "scope": ml_model_scope(model_row),
+                "symbol_count": ml_model_symbol_count(model_row),
+            }
+            for market_key, model_row in model_rows_by_market.items()
+        },
     }

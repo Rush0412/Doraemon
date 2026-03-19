@@ -12,8 +12,13 @@ from sqlalchemy.orm import Session
 from . import crud
 from .quant_base import _ensure_symbols_klines, _market_scope, _normalize_symbols, _seed_symbols_if_empty
 from .quant_ml_model_utils import (
+    is_composite_market_request,
+    ml_model_scope,
+    ml_model_symbol_count,
     recommended_market_model_min_symbol_count,
+    resolve_market_model_bundle,
     resolve_best_ml_model,
+    score_latest_features_for_model_bundle,
     score_latest_features_for_model,
 )
 
@@ -164,7 +169,7 @@ def run_ml_feature_job(job_params: dict, db: Session) -> dict:
     end = job_params.get("end")
     n_folds = max(1, int(job_params.get("n_folds", 1) or 1))
     min_rows = int(job_params.get("min_rows", 120))
-    symbol_limit = max(10, min(int(job_params.get("symbol_limit", 300)), 10000))
+    symbol_limit = max(10, min(int(job_params.get("symbol_limit", 10000)), 50000))
 
     raw_symbols = job_params.get("symbols")
     symbols = _normalize_symbols(raw_symbols, market, fallback_default=False)
@@ -437,8 +442,17 @@ def run_ml_train_job(job_params: dict, db: Session) -> dict:
         pickle.dump(artifact_payload, f)
 
     active = crud.get_active_ml_model(db, market=market, target=target)
+    min_symbol_count_required = recommended_market_model_min_symbol_count(db, market)
+    qualified_market_model = bool(
+        model_scope == "market"
+        and int(frame["symbol"].nunique()) >= int(min_symbol_count_required)
+    )
     auto_promoted = False
-    if active is None:
+    if qualified_market_model and (
+        active is None
+        or ml_model_scope(active) != "market"
+        or (ml_model_symbol_count(active) or 0) < int(min_symbol_count_required)
+    ):
         crud.set_ml_model_active(db, model_row)
         auto_promoted = True
 
@@ -451,6 +465,8 @@ def run_ml_train_job(job_params: dict, db: Session) -> dict:
         "feature_version": feature_version,
         "training_scope": model_scope,
         "training_symbol_count": int(frame["symbol"].nunique()),
+        "min_symbol_count_required": int(min_symbol_count_required),
+        "qualified_market_model": qualified_market_model,
         "metrics": metrics,
         "artifact_path": str(artifact_path),
         "auto_promoted": auto_promoted,
@@ -467,38 +483,73 @@ def run_ml_predict_job(job_params: dict, db: Session) -> dict:
         fallback_default=False,
     )
     market_wide_mode = not requested_symbols
-    allow_fallback_to_best = bool(market_wide_mode and not requested_model_id)
-    model_row = resolve_best_ml_model(
-        db,
-        market=market,
-        target=target,
-        model_id=requested_model_id,
-        require_market_scope=market_wide_mode,
-        min_symbol_count=(
-            recommended_market_model_min_symbol_count(db, market)
-            if market_wide_mode
-            else 0
-        ),
-        allow_fallback_to_best=allow_fallback_to_best,
-        attempt_repair=True,
-    )
-    scoring = score_latest_features_for_model(
-        db,
-        model_row=model_row,
-        market=market,
-        target=target,
-        symbols=requested_symbols,
-        limit=max(limit * 4, 200),
-        persist=True,
-    )
+    requested_symbols_text = job_params.get("symbols")
+    bundle_mode = bool(is_composite_market_request(market) and not requested_model_id)
+    if is_composite_market_request(market) and requested_model_id and market_wide_mode:
+        raise RuntimeError(
+            f"Composite market request {market} cannot pin a single model_id={requested_model_id}. "
+            "Clear model_id to use the default SH/SZ/300 market models, or choose a concrete market."
+        )
+    if bundle_mode:
+        model_rows_by_market, model_errors = resolve_market_model_bundle(
+            db,
+            market=market,
+            target=target,
+            require_market_scope=market_wide_mode,
+            attempt_repair=True,
+        )
+        scoring = score_latest_features_for_model_bundle(
+            db,
+            model_rows_by_market=model_rows_by_market,
+            market=market,
+            target=target,
+            symbols=requested_symbols_text,
+            limit=max(limit * 4, 200),
+            persist=True,
+        )
+        model_summary = {
+            "model_id": None,
+            "model_name": "composite_market_bundle",
+            "models_by_market": scoring.get("models_by_market") or {},
+            "model_errors": model_errors,
+        }
+    else:
+        allow_fallback_to_best = bool(market_wide_mode and not requested_model_id)
+        model_row = resolve_best_ml_model(
+            db,
+            market=market,
+            target=target,
+            model_id=requested_model_id,
+            require_market_scope=market_wide_mode,
+            min_symbol_count=(
+                recommended_market_model_min_symbol_count(db, market)
+                if market_wide_mode
+                else 0
+            ),
+            allow_fallback_to_best=allow_fallback_to_best,
+            attempt_repair=True,
+        )
+        scoring = score_latest_features_for_model(
+            db,
+            model_row=model_row,
+            market=market,
+            target=target,
+            symbols=requested_symbols,
+            limit=max(limit * 4, 200),
+            persist=True,
+        )
+        model_summary = {
+            "model_id": model_row.id,
+            "model_name": model_row.name,
+        }
 
     return {
         "message": "ml_predict finished",
-        "model_id": model_row.id,
-        "model_name": model_row.name,
+        **model_summary,
         "market": market,
         "target": target,
         "feature_version": scoring["feature_version"],
+        "feature_versions": scoring.get("feature_versions") or {},
         "rows_scored": scoring["rows_scored"],
         "rows_upserted": scoring["rows_upserted"],
         "top_predictions": scoring["top_predictions"][:limit],

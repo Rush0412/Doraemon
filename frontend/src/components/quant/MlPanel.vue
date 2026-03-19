@@ -8,7 +8,7 @@
       <span class="pill">ML</span>
     </header>
 
-    <p class="panel-note">大模型按市场分别维护。`SH`、`SZ`、`300` 建议各自单独训练，选股时会优先匹配同市场模型。</p>
+    <p class="panel-note">SH、SZ、300 模型分别保留。CN 场景默认自动聚合这三个子市场模型，不再强制要求单一 CN 模型。</p>
 
     <div class="toolbar">
       <button class="btn-primary" @click="runMlPipeline" :disabled="actionsBusy || mlRunning">一键执行</button>
@@ -56,7 +56,7 @@
           </div>
           <div>
             <label class="label">最大标的数</label>
-            <input v-model.number="mlFeatureForm.symbol_limit" type="number" min="10" max="10000" />
+            <input v-model.number="mlFeatureForm.symbol_limit" type="number" min="10" max="50000" />
           </div>
           <div>
             <label class="label">开始日期</label>
@@ -211,9 +211,12 @@
                     <button
                       class="btn-secondary"
                       @click="useMlModel(model)"
-                      :disabled="actionsBusy || mlRunning || model.scope !== 'market' || Number(model.symbol_count || 0) < 10"
+                      :disabled="actionsBusy || mlRunning || !model.is_qualified_market_model"
                     >
                       用于预测/选股
+                    </button>
+                    <button class="btn-secondary" @click="loadModelTrainingParams(model)" :disabled="actionsBusy || mlRunning">
+                      带入训练参数
                     </button>
                     <button class="btn-secondary" @click="promoteMlModel(model.id)" :disabled="model.is_active || actionsBusy || mlRunning">
                       设为当前模型
@@ -230,7 +233,7 @@
 
     <div class="info-card">
       <h3>4. ML + 量化联动选股</h3>
-      <p class="panel-note">先用同市场模型给最新特征打分，再按当前量化买卖参数做二次筛选，输出可优先加入自选池的候选股。</p>
+      <p class="panel-note">4 是“ML 初筛 + 当前量化策略复筛”的可执行候选，不等于 5 的纯 ML 概率榜。若 5 分数更高却没进 4，通常是被量化策略门槛、评估范围或 K 线覆盖淘汰。</p>
       <div class="form-grid">
         <div>
           <label class="label">市场</label>
@@ -290,11 +293,11 @@
         <div class="result-grid">
           <div>
             <p class="muted">模型</p>
-            <p class="metric-value">#{{ mlSelectResult.summary.model_id }} {{ mlSelectResult.summary.model_name || '' }}</p>
+            <p class="metric-value">{{ formatModelLabel(mlSelectResult.summary) }}</p>
           </div>
           <div>
             <p class="muted">模型范围</p>
-            <p class="metric-value">{{ mlSelectResult.summary.model_scope === 'market' ? '市场大模型' : '自定义模型' }}</p>
+            <p class="metric-value">{{ formatModelScope(mlSelectResult.summary.model_scope) }}</p>
           </div>
           <div>
             <p class="muted">模型覆盖标的</p>
@@ -354,11 +357,35 @@
           </tbody>
         </table>
       </div>
+      <div class="table-wrap" v-if="mlSelectResult?.excluded_ml_candidates?.length">
+        <h4>高分 ML 但未入选原因</h4>
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>上涨概率</th>
+              <th>预期收益(5D)</th>
+              <th>量化动作</th>
+              <th>未入选原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in mlSelectResult.excluded_ml_candidates" :key="`ml-excluded-${row.symbol}`">
+              <td class="mono">{{ row.symbol }}</td>
+              <td class="mono">{{ formatMetric(row.score_up_5d) }}</td>
+              <td class="mono">{{ formatMetric(row.expected_ret_5d) }}</td>
+              <td>{{ row.quant_action || '-' }}</td>
+              <td>{{ row.reason || row.reason_code || '-' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
       <p v-else-if="mlSelectResult" class="muted">当前没有同时满足 ML 与量化条件的候选股。</p>
     </div>
 
     <div class="info-card">
       <h3>5. 最新预测结果</h3>
+      <p class="panel-note">5 只按模型分数排序，展示纯 ML 观点，不包含当前量化买卖策略复筛。</p>
       <div class="table-wrap" v-if="mlPredictions?.length">
         <table class="table">
           <thead>
@@ -421,6 +448,7 @@ defineProps({
   refreshMlData: Function,
   useMlModel: Function,
   promoteMlModel: Function,
+  loadModelTrainingParams: Function,
   applyPredictionToBacktest: Function,
   applyPredictionToPool: Function
 })
@@ -436,5 +464,24 @@ const formatCount = (value) => {
   const num = Number(value)
   if (!Number.isFinite(num) || num <= 0) return '-'
   return String(num)
+}
+
+const formatModelScope = (scope) => {
+  if (scope === 'composite_market') return 'CN 子市场聚合'
+  if (scope === 'market') return '市场模型'
+  if (scope === 'custom') return '自定义模型'
+  return scope || '-'
+}
+
+const formatModelLabel = (summary) => {
+  if (!summary) return '-'
+  if (summary.model_scope === 'composite_market') {
+    const names = Object.entries(summary.model_names || {})
+      .map(([market, name]) => `${market}:${name}`)
+      .join(' | ')
+    return names || 'composite_market_bundle'
+  }
+  if (summary.model_id) return `#${summary.model_id} ${summary.model_name || ''}`.trim()
+  return summary.model_name || '-'
 }
 </script>

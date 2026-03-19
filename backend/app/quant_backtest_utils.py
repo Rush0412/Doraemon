@@ -317,7 +317,7 @@ def _load_candidate_symbols_from_db(db: Session, market: str, limit: int = 500) 
                 continue
             normalized.append(symbol)
     deduped = list(dict.fromkeys(normalized))
-    cap = max(20, min(int(limit or 500), 20000))
+    cap = max(20, min(int(limit or 500), 50000))
     return deduped[:cap]
 
 
@@ -335,7 +335,7 @@ def _evaluate_symbols_for_run(
     progress_cb=None,
 ) -> dict:
     top_n = max(1, min(int(top_n), 200))
-    max_eval_cap = 20000
+    max_eval_cap = 50000
     if not symbols:
         return {
             "evaluated": 0,

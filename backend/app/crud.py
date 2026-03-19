@@ -2,8 +2,9 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Optional, Union
 
-from sqlalchemy.orm import Session
-from sqlalchemy import select, or_, and_, func, not_, update
+from sqlalchemy.orm import Session, aliased
+from sqlalchemy import select, or_, and_, func, not_, update, inspect, delete, exists
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from . import models, schemas
 
@@ -40,6 +41,10 @@ def _ml_market_scope(market: Optional[str]) -> list[str]:
     if key in {"CN", "ALL", "A"}:
         return ["SH", "SZ", "300"]
     return [key]
+
+
+def ml_market_scope(market: Optional[str]) -> list[str]:
+    return list(_ml_market_scope(market))
 
 
 def _non_index_symbol_pred(model):
@@ -415,6 +420,58 @@ def list_kline_symbols_by_markets(
     return [str(row.symbol).strip() for row in result.all() if str(row.symbol or "").strip()]
 
 
+def list_symbols_below_kline_threshold(
+    db: Session,
+    markets: list[str],
+    *,
+    min_rows: int = 120,
+    include_indices: bool = False,
+    limit: int = 50000,
+) -> list[str]:
+    if not markets:
+        return []
+    min_rows = max(1, int(min_rows or 1))
+    limit = max(1, int(limit or 50000))
+    symbol_rows = list_stock_symbols_by_markets(db, markets, include_indices=include_indices)
+    if not symbol_rows:
+        return []
+
+    market_pred = _market_filter(models.StockKline, markets)
+    coverage_map: dict[str, int] = {}
+    if market_pred is not None:
+        stmt = select(
+            models.StockKline.symbol,
+            func.count(models.StockKline.id).label("row_count"),
+        ).where(market_pred)
+        if not include_indices:
+            stmt = stmt.where(
+                not_(
+                    or_(
+                        models.StockKline.symbol.ilike("sh000%"),
+                        models.StockKline.symbol.ilike("sz399%"),
+                    )
+                )
+            )
+        stmt = stmt.group_by(models.StockKline.symbol)
+        result = db.execute(stmt)
+        coverage_map = {
+            str(row.symbol).strip(): int(row.row_count or 0)
+            for row in result.all()
+            if str(row.symbol or "").strip()
+        }
+
+    candidates = []
+    for item in symbol_rows:
+        symbol = str(item.symbol or "").strip()
+        if not symbol:
+            continue
+        row_count = int(coverage_map.get(symbol, 0) or 0)
+        if row_count < min_rows:
+            candidates.append((row_count, symbol))
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    return [symbol for _, symbol in candidates[:limit]]
+
+
 def has_stock_symbols(db: Session, market: str) -> bool:
     stmt = select(models.StockSymbol.id).where(models.StockSymbol.market == market).limit(1)
     result = db.execute(stmt).scalar_one_or_none()
@@ -435,13 +492,20 @@ def repair_cn_market_mislabels(db: Session) -> dict:
     # which accidentally moved Shenzhen index symbols like sz399xxx
     # into the 300 market. We normalize them back to SZ.
     repaired = {}
+    errors = {}
+    conflicts_deleted = {}
     table_specs = [
         ("stock_symbols", models.StockSymbol),
         ("stock_klines", models.StockKline),
         ("ml_feature_snapshots", models.MLFeatureSnapshot),
         ("ml_predictions", models.MLPrediction),
     ]
+    inspector = inspect(db.get_bind())
     for name, table in table_specs:
+        if not inspector.has_table(name):
+            repaired[name] = 0
+            errors[name] = "table_missing"
+            continue
         stmt = (
             update(table)
             .where(
@@ -450,10 +514,70 @@ def repair_cn_market_mislabels(db: Session) -> dict:
             )
             .values(market="SZ")
         )
-        result = db.execute(stmt)
-        repaired[name] = int(result.rowcount or 0)
+        try:
+            with db.begin_nested():
+                conflict_delete_count = 0
+                if name == "stock_symbols":
+                    target = aliased(models.StockSymbol)
+                    conflict_stmt = delete(models.StockSymbol).where(
+                        models.StockSymbol.market == "300",
+                        models.StockSymbol.symbol.ilike("sz399%"),
+                        exists(
+                            select(1)
+                            .select_from(target)
+                            .where(
+                                target.market == "SZ",
+                                target.symbol == models.StockSymbol.symbol,
+                            )
+                        ),
+                    )
+                    conflict_delete_count = int(db.execute(conflict_stmt).rowcount or 0)
+                elif name == "stock_klines":
+                    target = aliased(models.StockKline)
+                    conflict_stmt = delete(models.StockKline).where(
+                        models.StockKline.market == "300",
+                        models.StockKline.symbol.ilike("sz399%"),
+                        exists(
+                            select(1)
+                            .select_from(target)
+                            .where(
+                                target.market == "SZ",
+                                target.symbol == models.StockKline.symbol,
+                                target.trade_date == models.StockKline.trade_date,
+                            )
+                        ),
+                    )
+                    conflict_delete_count = int(db.execute(conflict_stmt).rowcount or 0)
+                elif name == "ml_feature_snapshots":
+                    target = aliased(models.MLFeatureSnapshot)
+                    conflict_stmt = delete(models.MLFeatureSnapshot).where(
+                        models.MLFeatureSnapshot.market == "300",
+                        models.MLFeatureSnapshot.symbol.ilike("sz399%"),
+                        exists(
+                            select(1)
+                            .select_from(target)
+                            .where(
+                                target.market == "SZ",
+                                target.symbol == models.MLFeatureSnapshot.symbol,
+                                target.trade_date == models.MLFeatureSnapshot.trade_date,
+                                target.feature_version == models.MLFeatureSnapshot.feature_version,
+                            )
+                        ),
+                    )
+                    conflict_delete_count = int(db.execute(conflict_stmt).rowcount or 0)
+                result = db.execute(stmt)
+                repaired[name] = int(result.rowcount or 0)
+                if conflict_delete_count:
+                    conflicts_deleted[name] = conflict_delete_count
+        except SQLAlchemyError as exc:
+            repaired[name] = 0
+            errors[name] = str(exc)
     db.commit()
     repaired["total"] = int(sum(repaired.values()))
+    if conflicts_deleted:
+        repaired["conflicts_deleted"] = conflicts_deleted
+    if errors:
+        repaired["errors"] = errors
     return repaired
 
 
@@ -614,10 +738,13 @@ def list_ml_models(
     market: Optional[str] = None,
     target: Optional[str] = None,
     limit: int = 100,
+    *,
+    expand_market_scope: bool = False,
 ) -> list[models.MLModel]:
     stmt = select(models.MLModel)
     if market:
-        stmt = stmt.where(models.MLModel.market == market)
+        markets = _ml_market_scope(market) if expand_market_scope else [str(market).upper()]
+        stmt = stmt.where(models.MLModel.market.in_(markets))
     if target:
         stmt = stmt.where(models.MLModel.target == target)
     stmt = stmt.order_by(models.MLModel.id.desc()).limit(max(1, limit))
@@ -698,3 +825,150 @@ def list_latest_ml_predictions(
     stmt = stmt.order_by(models.MLPrediction.trade_date.desc(), models.MLPrediction.score_up_5d.desc()).limit(max(1, limit))
     result = db.execute(stmt)
     return result.scalars().all()
+
+
+def summarize_market_data_health(
+    db: Session,
+    *,
+    market: str = "CN",
+    target: str = "y_up_5d",
+    min_rows: int = 120,
+) -> dict:
+    request_market = str(market or "CN").strip().upper()
+    request_target = str(target or "y_up_5d").strip()
+    scope = _ml_market_scope(request_market)
+    inspector = inspect(db.get_bind())
+    table_names = [
+        "quant_jobs",
+        "stock_symbols",
+        "stock_klines",
+        "ml_feature_snapshots",
+        "ml_models",
+        "ml_predictions",
+    ]
+    tables = {name: bool(inspector.has_table(name)) for name in table_names}
+
+    def _group_counts(model, value_col, *, distinct_symbol: bool = False) -> dict[str, int]:
+        stmt = select(
+            model.market,
+            func.count(func.distinct(model.symbol) if distinct_symbol else value_col).label("count"),
+        ).where(model.market.in_(scope)).group_by(model.market).order_by(model.market)
+        rows = db.execute(stmt).all()
+        return {str(row[0]).upper(): int(row[1] or 0) for row in rows}
+
+    stock_symbols_by_market = {}
+    stock_kline_symbols_by_market = {}
+    stock_kline_rows_by_market = {}
+    feature_symbols_by_market = {}
+    prediction_symbols_by_market = {}
+
+    if tables["stock_symbols"]:
+        stock_symbols_by_market = _group_counts(models.StockSymbol, models.StockSymbol.id)
+    if tables["stock_klines"]:
+        stock_kline_symbols_by_market = _group_counts(
+            models.StockKline,
+            models.StockKline.id,
+            distinct_symbol=True,
+        )
+        stock_kline_rows_by_market = _group_counts(models.StockKline, models.StockKline.id)
+    if tables["ml_feature_snapshots"]:
+        feature_symbols_by_market = _group_counts(
+            models.MLFeatureSnapshot,
+            models.MLFeatureSnapshot.id,
+            distinct_symbol=True,
+        )
+    if tables["ml_predictions"]:
+        prediction_symbols_by_market = _group_counts(
+            models.MLPrediction,
+            models.MLPrediction.id,
+            distinct_symbol=True,
+        )
+
+    anomalies = {}
+    if tables["stock_symbols"]:
+        anomalies["stock_symbols_sz399_in_300"] = int(
+            db.execute(
+                select(func.count(models.StockSymbol.id)).where(
+                    models.StockSymbol.market == "300",
+                    models.StockSymbol.symbol.ilike("sz399%"),
+                )
+            ).scalar_one()
+            or 0
+        )
+    if tables["stock_klines"]:
+        anomalies["stock_klines_sz399_in_300"] = int(
+            db.execute(
+                select(func.count(models.StockKline.id)).where(
+                    models.StockKline.market == "300",
+                    models.StockKline.symbol.ilike("sz399%"),
+                )
+            ).scalar_one()
+            or 0
+        )
+    if tables["ml_feature_snapshots"]:
+        anomalies["ml_feature_sz399_in_300"] = int(
+            db.execute(
+                select(func.count(models.MLFeatureSnapshot.id)).where(
+                    models.MLFeatureSnapshot.market == "300",
+                    models.MLFeatureSnapshot.symbol.ilike("sz399%"),
+                )
+            ).scalar_one()
+            or 0
+        )
+
+    market_universe_symbols = 0
+    if tables["stock_klines"]:
+        market_universe_symbols = len(
+            list_kline_symbols_by_markets(
+                db,
+                scope,
+                min_rows=min_rows,
+                limit=50000,
+            )
+        )
+
+    latest_models = []
+    if tables["ml_models"]:
+        stmt = (
+            select(models.MLModel)
+            .where(
+                models.MLModel.market == request_market,
+                models.MLModel.target == request_target,
+            )
+            .order_by(models.MLModel.id.desc())
+            .limit(10)
+        )
+        rows = db.execute(stmt).scalars().all()
+        for item in rows:
+            params = item.params or {}
+            metrics = item.metrics or {}
+            latest_models.append(
+                {
+                    "id": int(item.id),
+                    "name": str(item.name),
+                    "status": str(item.status),
+                    "is_active": bool(item.is_active),
+                    "scope": str(params.get("training_scope") or ("custom" if params.get("requested_symbols") else "market")),
+                    "symbol_count": int(
+                        params.get("training_symbol_count")
+                        or metrics.get("symbol_count")
+                        or 0
+                    ),
+                    "auc": metrics.get("auc"),
+                }
+            )
+
+    return {
+        "request_market": request_market,
+        "market_scope": scope,
+        "target": request_target,
+        "tables": tables,
+        "stock_symbols_by_market": stock_symbols_by_market,
+        "stock_kline_symbols_by_market": stock_kline_symbols_by_market,
+        "stock_kline_rows_by_market": stock_kline_rows_by_market,
+        "feature_symbols_by_market": feature_symbols_by_market,
+        "prediction_symbols_by_market": prediction_symbols_by_market,
+        "market_universe_symbols_min_rows": int(market_universe_symbols),
+        "anomalies": anomalies,
+        "latest_models": latest_models,
+    }
