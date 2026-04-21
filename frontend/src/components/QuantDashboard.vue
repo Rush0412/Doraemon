@@ -1,4 +1,4 @@
-﻿<template>
+﻿﻿﻿﻿<template>
   <div class="quant-shell">
     <section class="hero">
       <div class="hero-head">
