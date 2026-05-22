@@ -9,6 +9,14 @@ from . import crud
 from .quant_core_utils import *
 from .quant_data_utils import *
 from .strategies import MacdCrossBuy, MacdCrossSell
+
+try:
+    from abupy.SlippageBu.ABuSlippageBuyMean import AbuSlippageBuyMean
+    from abupy.SlippageBu.ABuSlippageSellMean import AbuSlippageSellMean
+except ImportError:
+    AbuSlippageBuyMean = None
+    AbuSlippageSellMean = None
+
 def _summarize_orders(orders_pd):
     if orders_pd is None or getattr(orders_pd, "empty", True):
         return {
@@ -111,6 +119,8 @@ def _build_commission_dict(params: Optional[dict]):
             price = abs(_safe_float(args[1]) or 0.0)
             return trade_cnt, price
         a_order = args[0] if args else None
+        if not a_order:
+            return 0.0, 0.0
         trade_cnt = abs(_safe_float(getattr(a_order, "buy_cnt", 0)) or 0.0)
         price = abs(_safe_float(getattr(a_order, price_attr, 0)) or 0.0)
         return trade_cnt, price
@@ -147,11 +157,8 @@ def _trade_cost_config(params: Optional[dict]) -> dict:
 
 def _slippage_classes_from_bp(slippage_bp: float):
     bp = float(max(0.0, slippage_bp or 0.0))
-    if bp <= 0:
+    if bp <= 0 or AbuSlippageBuyMean is None or AbuSlippageSellMean is None:
         return None, None
-
-    from abupy.SlippageBu.ABuSlippageBuyMean import AbuSlippageBuyMean
-    from abupy.SlippageBu.ABuSlippageSellMean import AbuSlippageSellMean
 
     class AbuSlippageBuyBp(AbuSlippageBuyMean):
         def fit_price(self):

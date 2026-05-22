@@ -2,6 +2,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
@@ -52,7 +53,12 @@ strategies_module.MacdCrossBuy = _MacdCrossBuy
 strategies_module.MacdCrossSell = _MacdCrossSell
 sys.modules.setdefault("backend.app.strategies", strategies_module)
 
-from backend.app.quant_backtest_utils import _build_commission_dict, _summary_from_ranked_symbols
+import backend.app.quant_backtest_utils as quant_backtest_utils
+from backend.app.quant_backtest_utils import (
+    _build_commission_dict,
+    _slippage_classes_from_bp,
+    _summary_from_ranked_symbols,
+)
 
 
 class _DummyOrder:
@@ -75,6 +81,21 @@ class QuantBacktestUtilsTestCase(unittest.TestCase):
 
         self.assertAlmostEqual(commission_dict["buy_commission_func"](order), 5.0)
         self.assertAlmostEqual(commission_dict["sell_commission_func"](order), 6.2)
+
+    def test_build_commission_dict_handles_empty_args(self):
+        commission_dict = _build_commission_dict({})
+
+        self.assertEqual(commission_dict["buy_commission_func"](), 0.0)
+        self.assertEqual(commission_dict["sell_commission_func"](), 0.0)
+
+    def test_slippage_classes_from_bp_returns_none_when_abupy_missing(self):
+        with patch.object(quant_backtest_utils, "AbuSlippageBuyMean", None), patch.object(
+            quant_backtest_utils, "AbuSlippageSellMean", None
+        ):
+            buy_cls, sell_cls = _slippage_classes_from_bp(2)
+
+        self.assertIsNone(buy_cls)
+        self.assertIsNone(sell_cls)
 
     def test_summary_from_ranked_symbols_aggregates_cost_and_risk_metrics(self):
         rows = [
