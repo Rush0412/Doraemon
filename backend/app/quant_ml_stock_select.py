@@ -426,6 +426,8 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
             top_n=symbol_top_n,
             eval_limit=effective_eval_limit,
             progress_cb=progress_cb,
+            run_kwargs={"commission_dict": _build_commission_dict(params_with_strategy)},
+            summary_params=params_with_strategy,
         )
 
     prediction_map = {row["symbol"]: row for row in ml_candidates}
@@ -448,6 +450,7 @@ def run_ml_stock_select_job(job_params: dict, db: Session, *, job_id: Optional[i
         "sell_strategy": sell_strategy,
         "buy_params": _params_dict(job_params.get("buy_params")),
         "sell_params": _params_dict(job_params.get("sell_params")),
+        "trade_costs": _trade_cost_config(params_with_strategy),
     }
     summary_metrics = _summary_from_ranked_symbols(top_symbols, base_summary)
     recommendation = _build_strategy_recommendation(summary_metrics, top_symbols)

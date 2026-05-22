@@ -80,7 +80,7 @@
           </tbody>
         </table>
       </div>
-      <div v-if="selectedSymbols.length" class="selection">
+      <div v-if="selectedSymbols.length || savedPortfolios.length || portfolioSaveOpen" class="selection">
         <div class="selection-head">
           <span class="pill">选股篮</span>
           <div class="selection-actions">
@@ -112,12 +112,13 @@
           <button class="btn-ghost" @click="cancelSaveSelection">取消</button>
         </div>
         <p v-if="portfolioSaveError" class="error">{{ portfolioSaveError }}</p>
-        <div class="selection-chips">
+        <div v-if="selectedSymbols.length" class="selection-chips">
           <button v-for="symbol in selectedSymbols" :key="symbol" class="chip" @click="removeSymbol(symbol)">
             {{ formatSelectedSymbol(symbol) }}
             <span class="chip-close">×</span>
           </button>
         </div>
+        <p v-else class="muted">当前选股篮为空，可直接加载已保存组合。</p>
       </div>
       <div class="pager">
         <span class="muted">共 {{ store.total }} 条</span>

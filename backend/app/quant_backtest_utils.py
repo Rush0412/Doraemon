@@ -1,4 +1,4 @@
-﻿from datetime import date, timedelta
+from datetime import date, timedelta
 import re
 import math
 from typing import Optional
@@ -67,17 +67,166 @@ def _summarize_capital(capital):
     peak = cum.cummax()
     drawdown = (peak - cum) / peak
     max_drawdown = float(drawdown.max()) if not drawdown.empty else 0.0
+    downside = returns[returns < 0]
+    downside_volatility = float(downside.std() * np.sqrt(trade_year)) if not downside.empty and downside.std() else 0.0
+    sortino = float((returns.mean() / downside.std()) * np.sqrt(trade_year)) if not downside.empty and downside.std() else 0.0
+    calmar = float(annual_return / max_drawdown) if max_drawdown > 0 else 0.0
+    var_95 = float(returns.quantile(0.05)) if not returns.empty else 0.0
+    tail = returns[returns <= var_95]
+    cvar_95 = float(tail.mean()) if not tail.empty else var_95
+    drawdown_flags = (drawdown > 0).tolist()
+    max_drawdown_duration = 0
+    current_duration = 0
+    for flag in drawdown_flags:
+        if flag:
+            current_duration += 1
+            if current_duration > max_drawdown_duration:
+                max_drawdown_duration = current_duration
+        else:
+            current_duration = 0
     return {
+        "total_return": total_return,
         "annual_return": annual_return,
         "volatility": volatility,
+        "downside_volatility": downside_volatility,
         "sharpe": sharpe,
+        "sortino": sortino,
+        "calmar": calmar,
         "max_drawdown": max_drawdown,
+        "max_drawdown_duration": int(max_drawdown_duration),
+        "var_95": var_95,
+        "cvar_95": cvar_95,
     }
 
 
-def _summarize_run(abu_result):
+def _build_commission_dict(params: Optional[dict]):
+    params = params or {}
+    commission_rate = float(_safe_float(params.get("commission_rate")) or 0.00025)
+    min_commission = float(_safe_float(params.get("min_commission")) or 5.0)
+    stamp_tax_rate = float(_safe_float(params.get("stamp_tax_rate")) or 0.0005)
+
+    def _resolve_trade_args(*args, price_attr: str):
+        if len(args) >= 2:
+            trade_cnt = abs(_safe_float(args[0]) or 0.0)
+            price = abs(_safe_float(args[1]) or 0.0)
+            return trade_cnt, price
+        a_order = args[0] if args else None
+        trade_cnt = abs(_safe_float(getattr(a_order, "buy_cnt", 0)) or 0.0)
+        price = abs(_safe_float(getattr(a_order, price_attr, 0)) or 0.0)
+        return trade_cnt, price
+
+    def buy_commission(*args):
+        trade_cnt, price = _resolve_trade_args(*args, price_attr="buy_price")
+        notional = trade_cnt * price
+        if notional <= 0:
+            return 0.0
+        return max(min_commission, notional * commission_rate)
+
+    def sell_commission(*args):
+        trade_cnt, price = _resolve_trade_args(*args, price_attr="sell_price")
+        notional = trade_cnt * price
+        if notional <= 0:
+            return 0.0
+        return max(min_commission, notional * commission_rate) + notional * stamp_tax_rate
+
+    return {
+        "buy_commission_func": buy_commission,
+        "sell_commission_func": sell_commission,
+    }
+
+
+def _trade_cost_config(params: Optional[dict]) -> dict:
+    params = params or {}
+    return {
+        "commission_rate": float(_safe_float(params.get("commission_rate")) or 0.00025),
+        "min_commission": float(_safe_float(params.get("min_commission")) or 5.0),
+        "stamp_tax_rate": float(_safe_float(params.get("stamp_tax_rate")) or 0.0005),
+        "slippage_bp": float(_safe_float(params.get("slippage_bp")) or 0.0),
+    }
+
+
+def _slippage_classes_from_bp(slippage_bp: float):
+    bp = float(max(0.0, slippage_bp or 0.0))
+    if bp <= 0:
+        return None, None
+
+    from abupy.SlippageBu.ABuSlippageBuyMean import AbuSlippageBuyMean
+    from abupy.SlippageBu.ABuSlippageSellMean import AbuSlippageSellMean
+
+    class AbuSlippageBuyBp(AbuSlippageBuyMean):
+        def fit_price(self):
+            price = super().fit_price()
+            if price == float("inf"):
+                return price
+            adjusted = float(price) * (1.0 + bp / 10000.0)
+            self.buy_price = adjusted
+            return adjusted
+
+    class AbuSlippageSellBp(AbuSlippageSellMean):
+        def fit_price(self):
+            price = super().fit_price()
+            if price == float("-inf"):
+                return price
+            adjusted = float(price) * max(0.0, 1.0 - bp / 10000.0)
+            self.sell_price = adjusted
+            return adjusted
+
+    return AbuSlippageBuyBp, AbuSlippageSellBp
+
+
+def _summarize_execution_costs(capital, orders_pd, params: Optional[dict] = None) -> dict:
+    import pandas as pd
+
+    cost_config = _trade_cost_config(params)
+    commission_total = 0.0
+    commission_records = 0
+    commission_df = getattr(getattr(capital, "commission", None), "commission_df", None)
+    if commission_df is not None and not getattr(commission_df, "empty", True):
+        commission_series = pd.to_numeric(commission_df.get("commission"), errors="coerce").fillna(0.0)
+        commission_total = float(commission_series.sum())
+        commission_records = int(commission_series.shape[0])
+
+    estimated_slippage_cost = 0.0
+    turnover_ratio_est = 0.0
+    if orders_pd is not None and not getattr(orders_pd, "empty", True):
+        buy_cnt = pd.to_numeric(orders_pd.get("buy_cnt"), errors="coerce").fillna(0.0).abs()
+        buy_price = pd.to_numeric(orders_pd.get("buy_price"), errors="coerce").fillna(0.0).abs()
+        sell_price = pd.to_numeric(orders_pd.get("sell_price"), errors="coerce").fillna(0.0).abs()
+        traded_notional = float((buy_cnt * buy_price).sum() + (buy_cnt * sell_price).sum())
+        estimated_slippage_cost = traded_notional * float(cost_config["slippage_bp"]) / 10000.0
+        init_cash = float(getattr(capital, "read_cash", 0.0) or 0.0)
+        turnover_ratio_est = traded_notional / init_cash if init_cash > 0 else 0.0
+
+    estimated_total_cost = float(commission_total + estimated_slippage_cost)
+    return {
+        "trade_costs": {
+            **cost_config,
+            "commission_total": float(commission_total),
+            "estimated_slippage_cost": float(estimated_slippage_cost),
+            "estimated_total_cost": estimated_total_cost,
+            "commission_records": commission_records,
+            "turnover_ratio_est": float(turnover_ratio_est),
+        },
+        "commission_total": float(commission_total),
+        "estimated_slippage_cost": float(estimated_slippage_cost),
+        "estimated_total_cost": estimated_total_cost,
+        "turnover_ratio_est": float(turnover_ratio_est),
+    }
+
+
+def _summarize_run(abu_result, params: Optional[dict] = None):
     summary = _summarize_orders(getattr(abu_result, "orders_pd", None))
     summary.update(_summarize_capital(getattr(abu_result, "capital", None)))
+    summary.update(
+        _summarize_execution_costs(
+            getattr(abu_result, "capital", None),
+            getattr(abu_result, "orders_pd", None),
+            params=params,
+        )
+    )
+    summary["estimated_gross_profit_sum"] = float(summary.get("profit_sum", 0.0) or 0.0) + float(
+        summary.get("estimated_total_cost", 0.0) or 0.0
+    )
     return summary
 
 
@@ -89,10 +238,21 @@ def _aggregate_summaries(items: list[dict]) -> dict:
     wins = 0
     losses = 0
     profit_sum = 0.0
+    total_returns = []
     annual_returns = []
     volatilities = []
+    downside_volatilities = []
     sharpes = []
+    sortinos = []
+    calmars = []
     max_drawdowns = []
+    max_drawdown_durations = []
+    var_95_values = []
+    cvar_95_values = []
+    turnover_ratios = []
+    commission_total = 0.0
+    estimated_slippage_cost = 0.0
+    estimated_total_cost = 0.0
     for item in items:
         if not item:
             continue
@@ -101,11 +261,21 @@ def _aggregate_summaries(items: list[dict]) -> dict:
         wins += int(item.get("wins", 0) or 0)
         losses += int(item.get("losses", 0) or 0)
         profit_sum += float(item.get("profit_sum", 0.0) or 0.0)
+        commission_total += float(item.get("commission_total", 0.0) or 0.0)
+        estimated_slippage_cost += float(item.get("estimated_slippage_cost", 0.0) or 0.0)
+        estimated_total_cost += float(item.get("estimated_total_cost", 0.0) or 0.0)
         for key, bucket in (
+            ("total_return", total_returns),
             ("annual_return", annual_returns),
             ("volatility", volatilities),
+            ("downside_volatility", downside_volatilities),
             ("sharpe", sharpes),
+            ("sortino", sortinos),
+            ("calmar", calmars),
             ("max_drawdown", max_drawdowns),
+            ("var_95", var_95_values),
+            ("cvar_95", cvar_95_values),
+            ("turnover_ratio_est", turnover_ratios),
         ):
             value = item.get(key)
             if value is None:
@@ -117,11 +287,21 @@ def _aggregate_summaries(items: list[dict]) -> dict:
             if value != value:
                 continue
             bucket.append(value)
+        duration = item.get("max_drawdown_duration")
+        if duration is not None:
+            try:
+                max_drawdown_durations.append(int(duration))
+            except (TypeError, ValueError):
+                pass
     profit_mean = profit_sum / closed_orders if closed_orders else 0.0
     win_rate = (wins / closed_orders) * 100 if closed_orders else 0.0
+    avg_total_return = sum(total_returns) / len(total_returns) if total_returns else 0.0
     avg_return = sum(annual_returns) / len(annual_returns) if annual_returns else 0.0
     avg_volatility = sum(volatilities) / len(volatilities) if volatilities else 0.0
+    avg_downside_volatility = sum(downside_volatilities) / len(downside_volatilities) if downside_volatilities else 0.0
     avg_sharpe = sum(sharpes) / len(sharpes) if sharpes else 0.0
+    avg_sortino = sum(sortinos) / len(sortinos) if sortinos else 0.0
+    avg_calmar = sum(calmars) / len(calmars) if calmars else 0.0
     max_drawdown = max(max_drawdowns) if max_drawdowns else 0.0
     return {
         "closed_orders": closed_orders,
@@ -129,12 +309,24 @@ def _aggregate_summaries(items: list[dict]) -> dict:
         "wins": wins,
         "losses": losses,
         "profit_sum": profit_sum,
+        "estimated_gross_profit_sum": profit_sum + estimated_total_cost,
         "profit_mean": profit_mean,
         "win_rate": win_rate,
+        "total_return": avg_total_return,
         "annual_return": avg_return,
         "volatility": avg_volatility,
+        "downside_volatility": avg_downside_volatility,
         "sharpe": avg_sharpe,
+        "sortino": avg_sortino,
+        "calmar": avg_calmar,
         "max_drawdown": max_drawdown,
+        "max_drawdown_duration": max(max_drawdown_durations) if max_drawdown_durations else 0,
+        "var_95": sum(var_95_values) / len(var_95_values) if var_95_values else 0.0,
+        "cvar_95": sum(cvar_95_values) / len(cvar_95_values) if cvar_95_values else 0.0,
+        "commission_total": commission_total,
+        "estimated_slippage_cost": estimated_slippage_cost,
+        "estimated_total_cost": estimated_total_cost,
+        "turnover_ratio_est": sum(turnover_ratios) / len(turnover_ratios) if turnover_ratios else 0.0,
     }
 
 
@@ -280,25 +472,42 @@ def _summary_from_ranked_symbols(top_symbols: list[dict], template: Optional[dic
         base.setdefault("win_rate", 0.0)
         base.setdefault("max_drawdown", 0.0)
         base.setdefault("sharpe", 0.0)
+        base.setdefault("sortino", 0.0)
+        base.setdefault("calmar", 0.0)
         base.setdefault("profit_sum", 0.0)
+        base.setdefault("estimated_gross_profit_sum", 0.0)
         base.setdefault("annual_return", 0.0)
+        base.setdefault("commission_total", 0.0)
+        base.setdefault("estimated_slippage_cost", 0.0)
+        base.setdefault("estimated_total_cost", 0.0)
         base.setdefault("closed_orders", 0)
         return base
 
     count = max(1, len(top_symbols))
     win_rate = sum(float(item.get("win_rate", 0.0) or 0.0) for item in top_symbols) / count
     sharpe = sum(float(item.get("sharpe", 0.0) or 0.0) for item in top_symbols) / count
+    sortino = sum(float(item.get("sortino", 0.0) or 0.0) for item in top_symbols) / count
+    calmar = sum(float(item.get("calmar", 0.0) or 0.0) for item in top_symbols) / count
     max_drawdown = sum(float(item.get("max_drawdown", 0.0) or 0.0) for item in top_symbols) / count
     annual_return = sum(float(item.get("annual_return", 0.0) or 0.0) for item in top_symbols) / count
     profit_sum = sum(float(item.get("profit_sum", 0.0) or 0.0) for item in top_symbols)
+    commission_total = sum(float(item.get("commission_total", 0.0) or 0.0) for item in top_symbols)
+    estimated_slippage_cost = sum(float(item.get("estimated_slippage_cost", 0.0) or 0.0) for item in top_symbols)
+    estimated_total_cost = sum(float(item.get("estimated_total_cost", 0.0) or 0.0) for item in top_symbols)
     closed_orders = sum(int(item.get("closed_orders", 0) or 0) for item in top_symbols)
     base.update(
         {
             "win_rate": float(win_rate),
             "max_drawdown": float(max_drawdown),
             "sharpe": float(sharpe),
+            "sortino": float(sortino),
+            "calmar": float(calmar),
             "profit_sum": float(profit_sum),
+            "estimated_gross_profit_sum": float(profit_sum + estimated_total_cost),
             "annual_return": float(annual_return),
+            "commission_total": float(commission_total),
+            "estimated_slippage_cost": float(estimated_slippage_cost),
+            "estimated_total_cost": float(estimated_total_cost),
             "closed_orders": int(closed_orders),
         }
     )
@@ -333,6 +542,8 @@ def _evaluate_symbols_for_run(
     top_n: int = 10,
     eval_limit: Optional[int] = 120,
     progress_cb=None,
+    run_kwargs: Optional[dict] = None,
+    summary_params: Optional[dict] = None,
 ) -> dict:
     top_n = max(1, min(int(top_n), 200))
     max_eval_cap = 50000
@@ -368,10 +579,11 @@ def _evaluate_symbols_for_run(
                 end=end,
                 n_process_kl=1,
                 n_process_pick=1,
+                **(run_kwargs or {}),
             )
             if abu_result is None:
                 continue
-            summary = _summarize_run(abu_result)
+            summary = _summarize_run(abu_result, params=summary_params)
             if not summary:
                 continue
             row = {
@@ -382,7 +594,12 @@ def _evaluate_symbols_for_run(
                 "profit_mean": float(summary.get("profit_mean", 0.0) or 0.0),
                 "annual_return": float(summary.get("annual_return", 0.0) or 0.0),
                 "sharpe": float(summary.get("sharpe", 0.0) or 0.0),
+                "sortino": float(summary.get("sortino", 0.0) or 0.0),
+                "calmar": float(summary.get("calmar", 0.0) or 0.0),
                 "max_drawdown": float(summary.get("max_drawdown", 0.0) or 0.0),
+                "commission_total": float(summary.get("commission_total", 0.0) or 0.0),
+                "estimated_slippage_cost": float(summary.get("estimated_slippage_cost", 0.0) or 0.0),
+                "estimated_total_cost": float(summary.get("estimated_total_cost", 0.0) or 0.0),
             }
             rows.append(row)
         except Exception:
@@ -760,75 +977,94 @@ def _build_buy_factors(params: dict) -> list[dict]:
     strategy_id = (params.get("buy_strategy") or "breakout").strip().lower()
     defaults = _find_strategy_defaults(strategy_id, "buy")
     config = _merge_params(defaults, _params_dict(params.get("buy_params")))
+    slippage_bp = float(_safe_float(params.get("slippage_bp")) or 0.0)
+    buy_slippage_class, _ = _slippage_classes_from_bp(slippage_bp)
+
+    def _apply_buy_slippage(payload: dict) -> dict:
+        if buy_slippage_class is not None:
+            payload["slippage"] = buy_slippage_class
+        return payload
 
     if strategy_id in {"breakout", "break"}:
         xd = _param_int(config, "xd", _param_int(params, "buy_xd", 42))
-        return [{"class": AbuFactorBuyBreak, "xd": xd}]
+        return [_apply_buy_slippage({"class": AbuFactorBuyBreak, "xd": xd})]
     if strategy_id == "momentum_break":
         xd = _param_int(config, "xd", 20)
         return [{"class": AbuFactorBuyXDBK, "xd": xd}]
     if strategy_id == "double_ma":
         return [
-            {
+            _apply_buy_slippage(
+                {
                 "class": AbuDoubleMaBuy,
                 "fast": _param_int(config, "fast", 5),
                 "slow": _param_int(config, "slow", 60),
                 "resample_min": _param_int(config, "resample_min", 10),
                 "resample_max": _param_int(config, "resample_max", 100),
                 "change_threshold": _param_float(config, "change_threshold", 0.12),
-            }
+                }
+            )
         ]
     if strategy_id == "up_down_trend":
         return [
-            {
+            _apply_buy_slippage(
+                {
                 "class": AbuUpDownTrend,
                 "xd": _param_int(config, "xd", 20),
                 "past_factor": _param_int(config, "past_factor", 4),
                 "up_deg_threshold": _param_float(config, "up_deg_threshold", 3),
-            }
+                }
+            )
         ]
     if strategy_id == "up_down_golden":
         return [
-            {
+            _apply_buy_slippage(
+                {
                 "class": AbuUpDownGolden,
                 "xd": _param_int(config, "xd", 20),
                 "past_factor": _param_int(config, "past_factor", 4),
                 "up_deg_threshold": _param_float(config, "up_deg_threshold", 3),
-            }
+                }
+            )
         ]
     if strategy_id == "down_up_trend":
         return [
-            {
+            _apply_buy_slippage(
+                {
                 "class": AbuDownUpTrend,
                 "xd": _param_int(config, "xd", 20),
                 "past_factor": _param_int(config, "past_factor", 4),
                 "down_deg_threshold": _param_float(config, "down_deg_threshold", -3),
-            }
+                }
+            )
         ]
     if strategy_id == "week_win":
         return [
-            {
+            _apply_buy_slippage(
+                {
                 "class": AbuFactorBuyWD,
                 "buy_dw": _param_float(config, "buy_dw", 0.55),
                 "buy_dwm": _param_float(config, "buy_dwm", 0.618),
                 "dw_period": _param_int(config, "dw_period", 40),
-            }
+                }
+            )
         ]
     if strategy_id == "macd_cross":
         return [
-            {
+            _apply_buy_slippage(
+                {
                 "class": MacdCrossBuy,
                 "fast_period": _param_int(config, "fast_period", 12),
                 "slow_period": _param_int(config, "slow_period", 26),
                 "signal_period": _param_int(config, "signal_period", 9),
-            }
+                }
+            )
         ]
     if strategy_id == "put_break":
         xd = _param_int(config, "xd", 20)
-        return [{"class": AbuFactorBuyPutBreak, "xd": xd}]
+        return [_apply_buy_slippage({"class": AbuFactorBuyPutBreak, "xd": xd})]
     if strategy_id == "put_xdbk":
         xd = _param_int(config, "xd", 20)
-        return [{"class": AbuFactorBuyPutXDBK, "xd": xd}]
+        return [_apply_buy_slippage({"class": AbuFactorBuyPutXDBK, "xd": xd})]
 
     raise ValueError(f"Unknown buy strategy: {strategy_id}")
 
@@ -845,59 +1081,78 @@ def _build_sell_factors(params: dict) -> list[dict]:
     strategy_id = (params.get("sell_strategy") or "atr_stop").strip().lower()
     defaults = _find_strategy_defaults(strategy_id, "sell")
     config = _merge_params(defaults, _params_dict(params.get("sell_params")))
+    slippage_bp = float(_safe_float(params.get("slippage_bp")) or 0.0)
+    _, sell_slippage_class = _slippage_classes_from_bp(slippage_bp)
+
+    def _apply_sell_slippage(payload: dict) -> dict:
+        if sell_slippage_class is not None:
+            payload["slippage"] = sell_slippage_class
+        return payload
 
     if strategy_id == "atr_stop":
         return [
-            {
+            _apply_sell_slippage(
+                {
                 "class": AbuFactorAtrNStop,
                 "stop_loss_n": _param_float(config, "stop_loss_n", _param_float(params, "stop_loss_n", 0.5)),
                 "stop_win_n": _param_float(config, "stop_win_n", _param_float(params, "stop_win_n", 3.0)),
-            }
+                }
+            )
         ]
     if strategy_id == "atr_close":
         return [
-            {
+            _apply_sell_slippage(
+                {
                 "class": AbuFactorCloseAtrNStop,
                 "stop_loss_n": _param_float(config, "stop_loss_n", 0.5),
                 "stop_win_n": _param_float(config, "stop_win_n", 3.0),
-            }
+                }
+            )
         ]
     if strategy_id == "atr_pre":
         return [
-            {
+            _apply_sell_slippage(
+                {
                 "class": AbuFactorPreAtrNStop,
                 "stop_loss_n": _param_float(config, "stop_loss_n", 0.5),
                 "stop_win_n": _param_float(config, "stop_win_n", 3.0),
-            }
+                }
+            )
         ]
     if strategy_id == "sell_break":
-        return [{"class": AbuFactorSellBreak, "xd": _param_int(config, "xd", 20)}]
+        return [_apply_sell_slippage({"class": AbuFactorSellBreak, "xd": _param_int(config, "xd", 20)})]
     if strategy_id == "sell_xdbk":
-        return [{"class": AbuFactorSellXDBK, "xd": _param_int(config, "xd", 20)}]
+        return [_apply_sell_slippage({"class": AbuFactorSellXDBK, "xd": _param_int(config, "xd", 20)})]
     if strategy_id == "sell_n_day":
         return [
-            {
+            _apply_sell_slippage(
+                {
                 "class": AbuFactorSellNDay,
                 "sell_n": _param_int(config, "sell_n", 5),
                 "is_sell_today": bool(config.get("is_sell_today", False)),
-            }
+                }
+            )
         ]
     if strategy_id == "double_ma_sell":
         return [
-            {
+            _apply_sell_slippage(
+                {
                 "class": AbuDoubleMaSell,
                 "fast": _param_int(config, "fast", 5),
                 "slow": _param_int(config, "slow", 60),
-            }
+                }
+            )
         ]
     if strategy_id == "macd_cross":
         return [
-            {
+            _apply_sell_slippage(
+                {
                 "class": MacdCrossSell,
                 "fast_period": _param_int(config, "fast_period", 12),
                 "slow_period": _param_int(config, "slow_period", 26),
                 "signal_period": _param_int(config, "signal_period", 9),
-            }
+                }
+            )
         ]
 
     raise ValueError(f"Unknown sell strategy: {strategy_id}")

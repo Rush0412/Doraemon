@@ -1,4 +1,4 @@
-﻿﻿﻿﻿<template>
+﻿<template>
   <div class="quant-shell">
     <section class="hero">
       <div class="hero-head">
@@ -8,6 +8,7 @@
           <p class="hero-sub">
             数据更新、策略回测、参数寻优、量化分析与当日建议的一体化闭环。
           </p>
+          <p v-if="initError" class="error hero-error">{{ initError }}</p>
         </div>
         <div class="hero-actions">
           <button class="btn-ghost" @click="refreshJobs" :disabled="actionsBusy">刷新任务</button>
@@ -104,6 +105,7 @@
       :active="activeTab === 'strategy'"
       :backtest-form="backtestForm"
       :grid-form="gridForm"
+      :strategy-error="strategyError"
       v-model:grid-use-backtest-base="gridUseBacktestBase"
       v-model:grid-explore-all-strategies="gridExploreAllStrategies"
       :buy-strategies="buyStrategies"
@@ -183,6 +185,8 @@
       :tool-option-mode="toolOptionMode"
       :analysis-result="analysisResult"
       :analysis-text="analysisText"
+      :analysis-error="analysisError"
+      :analysis-status-text="analysisStatusText"
       :analysis-overlay-enabled="analysisOverlayEnabled"
       :set-analysis-overlay-enabled="setAnalysisOverlayEnabled"
       :run-tool="runTool"
@@ -218,12 +222,27 @@
       :apply-prediction-to-backtest="applyPredictionToBacktest"
       :apply-prediction-to-pool="applyPredictionToPool"
     />
+    <TrendAnalysisPanel
+      :active="activeTab === 'trend'"
+      :trend-form="trendForm"
+      v-model:trendFeatureInput="trendFeatureInput"
+      :trend-demo-result="trendDemoResult"
+      :trend-busy="trendBusy"
+      :trend-error="trendError"
+      :trend-image-preview="trendImagePreview"
+      :trend-image-meta="trendImageMeta"
+      :handle-trend-image-change="handleTrendImageChange"
+      :clear-trend-image="clearTrendImage"
+      :run-trend-demo="runTrendDemo"
+      :apply-symbol-to-backtest="applySymbolToBacktest"
+    />
     <JobsPanel
       :active="activeTab === 'jobs'"
       :store="store"
       :format-time="formatTime"
       :brief="brief"
       :export-url="exportUrl"
+      :job-export-sections="jobExportSections"
       :select-job="selectJob"
       :remove-job="removeJob"
       :batch-delete-finished="batchDeleteFinished"
@@ -240,12 +259,17 @@ import PreparePanel from './quant/PreparePanel.vue'
 import StrategyPanel from './quant/StrategyPanel.vue'
 import AnalysisPanel from './quant/AnalysisPanel.vue'
 import MlPanel from './quant/MlPanel.vue'
+import TrendAnalysisPanel from './quant/TrendAnalysisPanel.vue'
 import JobsPanel from './quant/JobsPanel.vue'
 import { useBacktestCharts } from './quant/composables/useBacktestCharts'
+import { useJobTracking } from './quant/composables/useJobTracking'
 import { useMlWorkflow } from './quant/composables/useMlWorkflow'
 import { useOperationSuggestion } from './quant/composables/useOperationSuggestion'
-import { usePortfolioSelection } from './quant/composables/usePortfolioSelection'
+import { usePrepareWorkflow } from './quant/composables/usePrepareWorkflow'
+import { useQuantExecution } from './quant/composables/useQuantExecution'
 import { useQuantSettings } from './quant/composables/useQuantSettings'
+import { useTrendAnalysisDemo } from './quant/composables/useTrendAnalysisDemo'
+import { quantDashboardTabs } from './quant/config/dashboardTabs'
 import {
   displayExchange,
   displayKind,
@@ -262,8 +286,6 @@ import {
 import {
   applyGridDefaults,
   applyStrategyDefaults,
-  buildGridParamPayload,
-  parseStringList,
   resetGridParamLists,
   resetStrategyParams
 } from './quant/utils/strategyGrid'
@@ -275,43 +297,7 @@ import {
 } from './quant/utils/dashboardFormatters'
 import { useQuantStore } from '../stores/quantStore'
 const store = useQuantStore()
-const tabs = [
-  {
-    id: 'prepare',
-    step: '01',
-    title: '数据准备',
-    subtitle: '标的与更新',
-    hint: '搜索标的、维护组合，并先完成 K 线更新。'
-  },
-  {
-    id: 'strategy',
-    step: '02',
-    title: '回测与寻优',
-    subtitle: '验证策略',
-    hint: '执行历史回测、参数交叉验证，并将最优组合应用到回测。'
-  },
-  {
-    id: 'tools',
-    step: '03',
-    title: '量化分析',
-    subtitle: '信号工具',
-    hint: '运行支撑阻力、跳空、趋势速度等工具，生成交易信号。'
-  },
-  {
-    id: 'ml',
-    step: '04',
-    title: 'ML 模型',
-    subtitle: '特征训练与预测',
-    hint: '构建特征、训练模型、生成预测并输出操作建议。'
-  },
-  {
-    id: 'jobs',
-    step: '05',
-    title: '任务中心',
-    subtitle: '状态与导出',
-    hint: '查看任务状态、结果明细并导出。'
-  }
-]
+const tabs = quantDashboardTabs
 const activeTab = ref('prepare')
 const activeTabMeta = computed(() => tabs.find((tab) => tab.id === activeTab.value) || tabs[0])
 const tabIndex = computed(() => tabs.findIndex((tab) => tab.id === activeTab.value))
@@ -343,8 +329,31 @@ const analysisOverlayEnabled = ref(true)
 const gridUseBacktestBase = ref(true)
 const gridExploreAllStrategies = ref(true)
 const flowRunning = ref(false)
+const trackedJobRunning = ref(false)
 const orderPage = ref(1)
 const orderPageSize = ref(20)
+const initError = ref('')
+const strategyError = ref('')
+const {
+  jobStats,
+  lastUpdateSummary,
+  latestJobByType,
+  refreshJobs,
+  selectJob,
+  removeJob,
+  batchDeleteFinished,
+  batchDeleteFailed,
+  exportUrl,
+  jobExportSections,
+  activeParamsText,
+  activeResultText,
+  activeErrorText,
+  waitForJobDone,
+  runTrackedJob
+} = useJobTracking({
+  store,
+  trackedJobRunning
+})
 const setAnalysisOverlayEnabled = (value) => {
   analysisOverlayEnabled.value = value
 }
@@ -363,6 +372,10 @@ const backtestForm = reactive({
   market: market.value,
   symbols: '',
   cash: 1000000,
+  commission_rate: 0.00025,
+  min_commission: 5,
+  stamp_tax_rate: 0.0005,
+  slippage_bp: 2,
   buy_xd: 42,
   stop_loss_n: 0.5,
   stop_win_n: 3.0,
@@ -444,7 +457,7 @@ const formatSelectedSymbol = (symbol, fallbackMarket = backtestForm.market) =>
 const formatSymbolText = (rawSymbols, fallbackMarket = backtestForm.market) =>
   formatSymbolTextUtil(rawSymbols, fallbackMarket)
 const actionsBusy = computed(
-  () => store.jobsLoading || store.activeJobLoading || store.symbolsLoading || flowRunning.value
+  () => store.jobsLoading || store.activeJobLoading || store.symbolsLoading || flowRunning.value || trackedJobRunning.value
 )
 const buyStrategies = computed(() => store.strategies?.buy || [])
 const sellStrategies = computed(() => store.strategies?.sell || [])
@@ -462,9 +475,11 @@ watch(market, (val) => {
   backtestForm.market = val
   gridForm.market = val
   toolForm.market = val
+  trendForm.market = val
   if (!backtestForm.symbols) backtestForm.symbols = defaultSymbolForMarket(val)
   if (!gridForm.symbols) gridForm.symbols = defaultSymbolForMarket(val)
   if (!toolForm.symbols) toolForm.symbols = defaultSymbolForMarket(val)
+  if (!trendForm.symbol) trendForm.symbol = defaultSymbolForMarket(val)
 })
 watch(
   () => backtestForm.symbols,
@@ -528,26 +543,6 @@ watch(
     }
   }
 )
-const jobStats = computed(() => {
-  const stats = { total: 0, running: 0, succeeded: 0, failed: 0 }
-  stats.total = store.jobs.length
-  for (const job of store.jobs) {
-    if (job.status === 'running') stats.running += 1
-    if (job.status === 'succeeded') stats.succeeded += 1
-    if (job.status === 'failed') stats.failed += 1
-  }
-  return stats
-})
-const lastUpdateSummary = computed(() => {
-  const job = store.jobs.find((item) => item.type === 'kl_update' && item.status === 'succeeded')
-  return job?.result || null
-})
-const latestJobByType = (type) => {
-  if (!type) return null
-  const jobs = store.jobs.filter((job) => job.type === type)
-  if (!jobs.length) return null
-  return jobs.reduce((latest, job) => (job.id > latest.id ? job : latest), jobs[0])
-}
 const backtestJob = computed(() => {
   if (store.activeJob && store.activeJob.type === 'backtest') return store.activeJob
   return latestJobByType('backtest')
@@ -696,9 +691,23 @@ const gridTopRuns = computed(() => {
     )
   }))
 })
-const analysisResult = computed(() => {
-  if (!store.activeJob || store.activeJob.type !== 'analysis') return null
-  return store.activeJob.result || null
+const analysisJob = computed(() => {
+  if (store.activeJob?.type === 'analysis') return store.activeJob
+  return latestJobByType('analysis')
+})
+const analysisResult = computed(() => analysisJob.value?.result || null)
+const analysisError = computed(() =>
+  analysisJob.value?.status === 'failed' ? analysisJob.value?.error || '分析任务执行失败。' : ''
+)
+const analysisStatusText = computed(() => {
+  if (!analysisJob.value) return ''
+  if (analysisJob.value.status === 'running' || analysisJob.value.status === 'queued') {
+    return `分析任务 #${analysisJob.value.id} 执行中`
+  }
+  if (analysisJob.value.status === 'failed') {
+    return '最近一次分析任务执行失败'
+  }
+  return `最近一次分析任务 #${analysisJob.value.id} 已完成`
 })
 const gridSummaryText = computed(() =>
   gridSummary.value ? JSON.stringify(gridSummary.value, null, 2) : ''
@@ -710,6 +719,7 @@ const { adviceProfile, adviceTemplates, operationSuggestion } = useOperationSugg
   analysisResult,
   backtestTradeStats,
   gridSummary,
+  gridDiagnostics,
   gridTopRuns
 })
 const { settingsReady, restoreQuantSettings, scheduleSaveQuantSettings, clearSettingsSaveTimer } = useQuantSettings({
@@ -732,116 +742,6 @@ const { settingsReady, restoreQuantSettings, scheduleSaveQuantSettings, clearSet
   adviceProfile,
   adviceTemplates
 })
-const applyGridCandidateToBacktest = async (candidate) => {
-  if (!candidate) return
-  if (candidate.buy_strategy) {
-    buyStrategyId.value = candidate.buy_strategy
-  }
-  if (candidate.sell_strategy) {
-    sellStrategyId.value = candidate.sell_strategy
-  }
-  await nextTick()
-  if (candidate.buy_params) {
-    resetStrategyParams(activeBuyStrategy.value, buyStrategyParams)
-    Object.assign(buyStrategyParams, candidate.buy_params)
-    if (candidate.buy_params.xd !== undefined) {
-      backtestForm.buy_xd = Number(candidate.buy_params.xd) || backtestForm.buy_xd
-    }
-  }
-  if (candidate.sell_params) {
-    resetStrategyParams(activeSellStrategy.value, sellStrategyParams)
-    Object.assign(sellStrategyParams, candidate.sell_params)
-    if (candidate.sell_params.stop_loss_n !== undefined) {
-      const val = Number(candidate.sell_params.stop_loss_n)
-      if (Number.isFinite(val)) backtestForm.stop_loss_n = val
-    }
-    if (candidate.sell_params.stop_win_n !== undefined) {
-      const val = Number(candidate.sell_params.stop_win_n)
-      if (Number.isFinite(val)) backtestForm.stop_win_n = val
-    }
-  }
-  if (candidate.buy_xd !== undefined) {
-    const val = Number(candidate.buy_xd)
-    if (Number.isFinite(val) && val > 0) backtestForm.buy_xd = val
-  }
-  if (candidate.stop_loss_n !== undefined) {
-    const val = Number(candidate.stop_loss_n)
-    if (Number.isFinite(val)) backtestForm.stop_loss_n = val
-  }
-  if (candidate.stop_win_n !== undefined) {
-    const val = Number(candidate.stop_win_n)
-    if (Number.isFinite(val)) backtestForm.stop_win_n = val
-  }
-  if (Array.isArray(candidate.symbols) && candidate.symbols.length) {
-    backtestForm.symbols = normalizeSymbolsInputForUi(candidate.symbols.join(', '))
-  }
-  if (typeof candidate.symbol === 'string' && candidate.symbol.trim()) {
-    backtestForm.symbols = normalizeSymbolsInputForUi(candidate.symbol.trim())
-    chartSymbol.value = candidate.symbol.trim()
-  }
-  if (candidate.market) backtestForm.market = candidate.market
-  activeTab.value = 'strategy'
-}
-const applyGridToBacktest = async () => {
-  await applyGridCandidateToBacktest(gridSummary.value)
-}
-const applyGridRunToBacktest = async (run) => {
-  await applyGridCandidateToBacktest(run)
-}
-const applyGridNextSuggestions = () => {
-  const next = gridNextParamSuggestions.value
-  if (!next || typeof next !== 'object') return
-  if (next.buy_params_grid && typeof next.buy_params_grid === 'object') {
-    Object.entries(next.buy_params_grid).forEach(([key, values]) => {
-      if (!Array.isArray(values)) return
-      gridBuyParamLists[key] = values.join(', ')
-    })
-  }
-  if (next.sell_params_grid && typeof next.sell_params_grid === 'object') {
-    Object.entries(next.sell_params_grid).forEach(([key, values]) => {
-      if (!Array.isArray(values)) return
-      gridSellParamLists[key] = values.join(', ')
-    })
-  }
-}
-const toFiniteNumberOrNull = (value) => {
-  const num = Number(value)
-  return Number.isFinite(num) ? num : null
-}
-const normalizePredictionSignal = (symbol, signal) => {
-  if (!signal || typeof signal !== 'object') return null
-  return {
-    symbol: String(symbol || signal.symbol || '').trim(),
-    trade_date: signal.trade_date || null,
-    action: String(signal.action || '').trim().toLowerCase() || null,
-    score_up_5d: toFiniteNumberOrNull(signal.score_up_5d),
-    expected_ret_5d: toFiniteNumberOrNull(signal.expected_ret_5d),
-    stop_loss: toFiniteNumberOrNull(signal.stop_loss),
-    take_profit: toFiniteNumberOrNull(signal.take_profit),
-    entry_price: toFiniteNumberOrNull(signal.entry_price),
-    position_min: toFiniteNumberOrNull(signal.position_min),
-    position_max: toFiniteNumberOrNull(signal.position_max),
-  }
-}
-const applySymbolToBacktest = (symbol, signal = null) => {
-  if (!symbol) return
-  const text = String(symbol).trim()
-  if (!text) return
-  backtestForm.symbols = normalizeSymbolsInputForUi(text)
-  backtestForm.market = inferMarketBySymbol(text, market.value || 'SH')
-  chartSymbol.value = text
-  predictionSignal.value = normalizePredictionSignal(text, signal)
-  activeTab.value = 'strategy'
-}
-const applySymbolToAnalysis = async (symbol) => {
-  if (!symbol) return
-  const text = String(symbol).trim()
-  if (!text) return
-  toolForm.symbols = normalizeSymbolsInputForUi(text)
-  toolForm.market = inferMarketBySymbol(text, market.value || 'SH')
-  activeTab.value = 'tools'
-  await runTool()
-}
 const {
   klineData,
   equityData,
@@ -961,134 +861,30 @@ watch(sellStrategyParams, scheduleSaveQuantSettings, { deep: true })
 watch(gridBuyParamLists, scheduleSaveQuantSettings, { deep: true })
 watch(gridSellParamLists, scheduleSaveQuantSettings, { deep: true })
 watch(adviceTemplates, scheduleSaveQuantSettings, { deep: true })
-const activeParamsText = computed(() =>
-  store.activeJob?.params ? JSON.stringify(store.activeJob.params, null, 2) : ''
+watch(
+  () => selectedSymbols.value.join(','),
+  () => {
+    syncSelectedSymbols()
+  }
 )
-const activeResultText = computed(() =>
-  store.activeJob?.result ? JSON.stringify(store.activeJob.result, null, 2) : ''
-)
-const activeErrorText = computed(() =>
-  store.activeJob?.error ? String(store.activeJob.error) : ''
-)
-const toolOptionMode = computed(() => {
-  if (toolForm.tool === 'support_resistance') return 'support'
-  if (toolForm.tool === 'jump_gap') return 'jump'
-  if (toolForm.tool === 'trend_speed') return 'trend'
-  if (toolForm.tool === 'shift_distance') return 'shift'
-  if (toolForm.tool === 'regress' || toolForm.tool === 'price_channel') return 'regress'
-  if (toolForm.tool === 'correlation') return 'corr'
-  if (toolForm.tool === 'distance') return 'distance'
-  return 'base'
-})
-const totalPages = computed(() => Math.max(1, Math.ceil(store.total / store.pageSize)))
-const search = async () => {
-  await store.searchSymbols({
-    market: market.value,
-    q: query.value,
-    kind: kind.value,
-    page: 1,
-    pageSize: pageSize.value
-  })
-}
-const importSymbols = async () => {
-  const data = await store.importSymbols(market.value)
-  if (data) {
-    await store.searchSymbols({
-      market: market.value,
-      q: query.value,
-      kind: kind.value,
-      page: 1,
-      pageSize: pageSize.value
-    })
-  }
-}
-const importAllSymbols = async () => {
-  const data = await store.importSymbols('CN')
-  if (data) {
-    await store.searchSymbols({
-      market: market.value,
-      q: query.value,
-      kind: kind.value,
-      page: 1,
-      pageSize: pageSize.value
-    })
-  }
-}
-const refreshJobs = async () => {
-  await store.fetchJobs()
-}
-const selectJob = async (id) => {
-  await store.fetchJob(id)
-}
-const removeJob = async (job) => {
-  await store.deleteJob(job.id, { force: job.status === 'running' })
-}
-const batchDeleteFinished = async () => {
-  const result = await store.deleteJobsBatch({ delete_finished: true })
-  if ((result.deleted_ids || []).length === 0) {
-    await store.fetchJobs()
-  }
-}
-const batchDeleteFailed = async () => {
-  const result = await store.deleteJobsBatch({ statuses: ['failed'], delete_finished: false })
-  if ((result.deleted_ids || []).length === 0) {
-    await store.fetchJobs()
-  }
-}
-const exportUrl = (id, format, section) => {
-  const params = new URLSearchParams()
-  if (format) params.set('format', format)
-  if (section) params.set('section', section)
-  const qs = params.toString()
-  return `/api/v1/jobs/${encodeURIComponent(String(id))}/export${qs ? `?${qs}` : ''}`
-}
-function addSymbol(symbol) {
-  if (!symbol || selectedSymbols.value.includes(symbol)) return
-  selectedSymbols.value = [...selectedSymbols.value, symbol]
-  syncSelectedSymbols()
-}
-const isSelected = (symbol) => selectedSymbols.value.includes(symbol)
-const toggleSymbol = (symbol) => {
-  if (isSelected(symbol)) {
-    removeSymbol(symbol)
-    return
-  }
-  addSymbol(symbol)
-}
-const removeSymbol = (symbol) => {
-  selectedSymbols.value = selectedSymbols.value.filter((item) => item !== symbol)
-  syncSelectedSymbols()
-}
-const clearSymbols = () => {
-  selectedSymbols.value = []
-  syncSelectedSymbols()
-}
-const selectPage = () => {
-  const pageSymbols = store.symbols.map((item) => item.symbol)
-  const merged = new Set([...selectedSymbols.value, ...pageSymbols])
-  selectedSymbols.value = Array.from(merged)
-  syncSelectedSymbols()
-}
-const invertPage = () => {
-  const pageSymbols = new Set(store.symbols.map((item) => item.symbol))
-  const next = selectedSymbols.value.filter((symbol) => !pageSymbols.has(symbol))
-  for (const symbol of pageSymbols) {
-    if (!selectedSymbols.value.includes(symbol)) {
-      next.push(symbol)
-    }
-  }
-  selectedSymbols.value = next
-  syncSelectedSymbols()
-}
-const syncSelectedSymbols = () => {
-  const text = normalizeSymbolsInputForUi(selectedSymbols.value.join(', '))
-  backtestForm.symbols = text
-  gridForm.symbols = text
-  toolForm.symbols = text
-  syncMlSymbols(text)
-  updateForm.symbols = text
-}
 const {
+  totalPages,
+  search,
+  importSymbols,
+  importAllSymbols,
+  addSymbol,
+  isSelected,
+  toggleSymbol,
+  removeSymbol,
+  clearSymbols,
+  selectPage,
+  invertPage,
+  syncSelectedSymbols,
+  changePage,
+  applyPageSize,
+  runKlUpdate,
+  runMarketCoverageUpdate,
+  runFullAshareUpdate,
   savedPortfolios,
   selectedPortfolio,
   portfolioDraftName,
@@ -1100,92 +896,87 @@ const {
   confirmSaveSelection,
   loadPortfolio,
   deletePortfolio
-} = usePortfolioSelection({
+} = usePrepareWorkflow({
+  store,
+  market,
+  query,
+  kind,
+  pageSize,
   selectedSymbols,
-  syncSelectedSymbols,
-  splitSymbolInput
+  updateForm,
+  backtestForm,
+  gridForm,
+  toolForm,
+  syncMlSymbols: (text) => syncMlSymbols?.(text),
+  splitSymbolInput,
+  normalizeSymbolsInputForUi
 })
-const changePage = async (nextPage) => {
-  if (nextPage < 1 || nextPage > totalPages.value) return
-  await store.searchSymbols({
-    market: market.value,
-    q: query.value,
-    kind: kind.value,
-    page: nextPage,
-    pageSize: pageSize.value
-  })
-}
-const applyPageSize = async () => {
-  await store.searchSymbols({
-    market: market.value,
-    q: query.value,
-    kind: kind.value,
-    page: 1,
-    pageSize: pageSize.value
-  })
-}
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-const waitForJobDone = async (jobId, timeoutMs = 20 * 60 * 1000, pollMs = 1200) => {
-  const startedAt = Date.now()
-  while (Date.now() - startedAt <= timeoutMs) {
-    let current = null
-    try {
-      current = await store.fetchJob(jobId, { silent: true })
-    } catch (err) {
-      if (err?.response?.status === 404) {
-        throw new Error(`任务 ${jobId} 已被移除`)
-      }
-      throw err
-    }
-    if (current?.id === jobId && ['succeeded', 'failed', 'cancelled'].includes(current.status)) {
-      await store.fetchJobs()
-      if (current.status === 'failed' || current.status === 'cancelled') {
-        throw new Error(current.error || `任务 ${jobId} 执行失败`)
-      }
-      return current
-    }
-    await sleep(pollMs)
-  }
-  throw new Error(`任务 ${jobId} 超时未完成`)
-}
-function buildMlStockSelectPayload(form) {
-  const rawSymbols = String(form.symbols || '').trim()
-  const isMarketWide = !rawSymbols
-  const marketWideLimitBase = Math.max(3000, Number(form.symbol_eval_limit || 0), Number(form.candidate_limit || 0))
-  const predictionLimit = isMarketWide
-    ? Math.max(marketWideLimitBase, Number(form.prediction_limit || 3000))
-    : Number(form.prediction_limit || 300)
-  const candidateLimit = isMarketWide
-    ? Math.max(marketWideLimitBase, Number(form.candidate_limit || 3000))
-    : Number(form.candidate_limit || 120)
-  const evalLimit = isMarketWide
-    ? Math.max(marketWideLimitBase, Number(form.symbol_eval_limit || candidateLimit))
-    : Number(form.symbol_eval_limit || 120)
-  return {
-    market: form.market,
-    target: form.target || 'y_up_5d',
-    model_id: form.model_id || undefined,
-    symbols: rawSymbols || undefined,
-    full_market_scan: isMarketWide,
-    min_score: Number(form.min_score || 0.55),
-    prediction_limit: predictionLimit,
-    candidate_limit: candidateLimit,
-    symbol_top_n: Number(form.symbol_top_n || 20),
-    symbol_eval_limit: evalLimit,
-    min_kline_rows: Number(form.min_kline_rows || 120),
-    n_folds: backtestForm.n_folds,
-    start: backtestForm.start || undefined,
-    end: backtestForm.end || undefined,
-    cash: backtestForm.cash,
-    buy_xd: backtestForm.buy_xd,
-    stop_loss_n: backtestForm.stop_loss_n,
-    stop_win_n: backtestForm.stop_win_n,
-    buy_strategy: buyStrategyId.value,
-    buy_params: { ...buyStrategyParams },
-    sell_strategy: sellStrategyId.value,
-    sell_params: { ...sellStrategyParams }
-  }
-}
+const {
+  toolOptionMode,
+  applyGridToBacktest,
+  applyGridRunToBacktest,
+  applyGridNextSuggestions,
+  applySymbolToBacktest,
+  applySymbolToAnalysis,
+  buildMlStockSelectPayload,
+  runVerify,
+  runBacktest,
+  runStockSelect,
+  runClosedLoop,
+  runGridSearch,
+  runTool
+} = useQuantExecution({
+  store,
+  market,
+  activeTab,
+  flowRunning,
+  strategyError,
+  chartSymbol,
+  predictionSignal,
+  klineError,
+  backtestForm,
+  gridForm,
+  toolForm,
+  toolOptions,
+  buyStrategyId,
+  sellStrategyId,
+  buyStrategyParams,
+  sellStrategyParams,
+  activeBuyStrategy,
+  activeSellStrategy,
+  buyStrategies,
+  sellStrategies,
+  gridBuyParamLists,
+  gridSellParamLists,
+  gridUseBacktestBase,
+  gridExploreAllStrategies,
+  gridJob,
+  waitForJobDone,
+  runTrackedJob,
+  loadKlineChart,
+  inferMarketBySymbol,
+  inferMarketBySymbols,
+  normalizeSymbolsInputForUi
+})
+const {
+  trendForm,
+  trendFeatureInput,
+  trendBusy,
+  trendError,
+  trendDemoResult,
+  trendImagePreview,
+  trendImageMeta,
+  clearTrendImage,
+  handleTrendImageChange,
+  runTrendDemo,
+  revokeTrendPreview
+} = useTrendAnalysisDemo({
+  market,
+  store,
+  inferMarketBySymbol,
+  defaultSymbolForMarket,
+  applySymbolToBacktest
+})
 const {
   mlRunning,
   mlFeatureForm,
@@ -1219,301 +1010,38 @@ const {
   onAddPrediction: addSymbol,
   buildMlStockSelectPayload
 })
-const buildBacktestPayload = () => {
-  const effectiveMarket = inferMarketBySymbols(backtestForm.symbols, backtestForm.market)
-  backtestForm.market = effectiveMarket
-  return {
-    market: effectiveMarket,
-    symbols: backtestForm.symbols,
-    n_folds: backtestForm.n_folds,
-    start: backtestForm.start || undefined,
-    end: backtestForm.end || undefined,
-    cash: backtestForm.cash,
-    buy_xd: backtestForm.buy_xd,
-    stop_loss_n: backtestForm.stop_loss_n,
-    stop_win_n: backtestForm.stop_win_n,
-    buy_strategy: buyStrategyId.value,
-    buy_params: { ...buyStrategyParams },
-    sell_strategy: sellStrategyId.value,
-    sell_params: { ...sellStrategyParams },
-    orders_preview_limit: 8000,
-    actions_preview_limit: 8000
-  }
-}
-const buildStockSelectPayload = () => {
-  const rawSymbols = String(backtestForm.symbols || '').trim()
-  const isMarketWide = !rawSymbols
-  const fallbackCandidateLimit = isMarketWide
-    ? Math.max(Number(gridForm.symbol_eval_limit || 120), 3000)
-    : Math.max(Number(gridForm.symbol_eval_limit || 120), Number(gridForm.symbol_top_n || 10) * 3)
-  const evalLimit = isMarketWide
-    ? Math.max(Number(gridForm.symbol_eval_limit || fallbackCandidateLimit), fallbackCandidateLimit)
-    : Number(gridForm.symbol_eval_limit || 120)
-  const effectiveMarket = inferMarketBySymbols(rawSymbols, backtestForm.market)
-  backtestForm.market = effectiveMarket
-  return {
-    market: effectiveMarket,
-    symbols: rawSymbols || undefined,
-    all_symbols: isMarketWide,
-    full_market_scan: isMarketWide,
-    candidate_limit: fallbackCandidateLimit,
-    symbol_eval_limit: evalLimit,
-    symbol_top_n: Number(gridForm.symbol_top_n || 10),
-    min_kline_rows: 120,
-    n_folds: backtestForm.n_folds,
-    start: backtestForm.start || undefined,
-    end: backtestForm.end || undefined,
-    cash: backtestForm.cash,
-    buy_xd: backtestForm.buy_xd,
-    stop_loss_n: backtestForm.stop_loss_n,
-    stop_win_n: backtestForm.stop_win_n,
-    buy_strategy: buyStrategyId.value,
-    buy_params: { ...buyStrategyParams },
-    sell_strategy: sellStrategyId.value,
-    sell_params: { ...sellStrategyParams }
-  }
-}
-const runVerify = async () => {
-  const job = await store.startVerify()
-  await store.fetchJob(job.id)
-}
-const runKlUpdate = async () => {
-  const symbols = selectedSymbols.value.length ? selectedSymbols.value.join(',') : ''
-  const job = await store.startKlUpdate({
-    market: updateForm.market,
-    n_folds: updateForm.n_folds,
-    start: updateForm.start || undefined,
-    end: updateForm.end || undefined,
-    how: updateForm.how,
-    n_jobs: updateForm.n_jobs,
-    source_order: 'akshare,abupy',
-    quick_fail: true,
-    symbol_timeout_sec: 20,
-    coverage_mode: 'all',
-    min_kline_rows: updateForm.min_kline_rows,
-    symbols: symbols || undefined,
-    all: !symbols
-  })
-  await store.fetchJob(job.id)
-}
-const runMarketCoverageUpdate = async () => {
-  await store.importSymbols(updateForm.market || market.value || 'CN')
-  const job = await store.startKlUpdate({
-    market: updateForm.market,
-    n_folds: updateForm.n_folds,
-    start: updateForm.start || undefined,
-    end: updateForm.end || undefined,
-    how: updateForm.how,
-    n_jobs: updateForm.n_jobs,
-    source_order: 'akshare,abupy',
-    quick_fail: true,
-    symbol_timeout_sec: 20,
-    coverage_mode: updateForm.coverage_mode || 'below_min_rows',
-    min_kline_rows: updateForm.min_kline_rows,
-    symbols: undefined,
-    all: true
-  })
-  await store.fetchJob(job.id)
-}
-const runFullAshareUpdate = async () => {
-  await store.importSymbols('CN')
-  const job = await store.startKlUpdate({
-    market: 'CN',
-    n_folds: updateForm.n_folds,
-    start: updateForm.start || undefined,
-    end: updateForm.end || undefined,
-    how: updateForm.how,
-    n_jobs: updateForm.n_jobs,
-    source_order: 'akshare,abupy',
-    quick_fail: true,
-    symbol_timeout_sec: 20,
-    coverage_mode: 'all',
-    min_kline_rows: updateForm.min_kline_rows,
-    symbols: undefined,
-    all: true
-  })
-  await store.fetchJob(job.id)
-}
-const runBacktest = async () => {
-  const job = await store.startBacktest(buildBacktestPayload())
-  await store.fetchJob(job.id)
-  return job
-}
-const runStockSelect = async () => {
-  const job = await store.startStockSelect(buildStockSelectPayload())
-  await store.fetchJob(job.id)
-  return job
-}
-const runClosedLoop = async () => {
-  flowRunning.value = true
-  klineError.value = ''
+const runInitStep = async (label, task) => {
   try {
-    const selectQueued = await store.startStockSelect(buildStockSelectPayload())
-    const selectDone = await waitForJobDone(selectQueued.id, 90 * 60 * 1000)
-    const selectResult = selectDone?.result || {}
-    const topSymbols = Array.isArray(selectResult.top_symbols)
-      ? selectResult.top_symbols.map((item) => String(item.symbol || '').trim()).filter(Boolean)
-      : []
-    if (!topSymbols.length) {
-      throw new Error('独立选股未返回可回测标的，请调整范围后重试。')
-    }
-    const picked = topSymbols.slice(0, Math.max(1, Number(gridForm.symbol_top_n || 10)))
-    backtestForm.symbols = normalizeSymbolsInputForUi(picked.join(', '))
-    chartSymbol.value = picked[0]
-    const firstActionable = Array.isArray(selectResult.actionable_candidates)
-      ? selectResult.actionable_candidates.find((item) => String(item?.symbol || '').trim() === picked[0])
-      : null
-    predictionSignal.value = normalizePredictionSignal(picked[0], {
-      symbol: picked[0],
-      trade_date: selectResult?.summary?.end || null,
-      action: firstActionable?.action || null,
-      stop_loss: firstActionable?.stop_loss,
-      take_profit: firstActionable?.take_profit,
-      entry_price: firstActionable?.last_close
-    })
-    const backtestQueued = await store.startBacktest(buildBacktestPayload())
-    await waitForJobDone(backtestQueued.id, 90 * 60 * 1000)
-    toolForm.market = backtestForm.market
-    toolForm.tool = 'support_resistance'
-    toolForm.symbols = normalizeSymbolsInputForUi(picked[0])
-    toolForm.start = backtestForm.start || ''
-    toolForm.end = backtestForm.end || ''
-    const analysisQueued = await store.startQuantTool({
-      market: toolForm.market,
-      tool: toolForm.tool,
-      symbols: toolForm.symbols,
-      n_folds: toolForm.n_folds,
-      start: toolForm.start || undefined,
-      end: toolForm.end || undefined,
-      limit: toolForm.limit,
-      options: buildToolOptions()
-    })
-    await waitForJobDone(analysisQueued.id, 20 * 60 * 1000)
-    activeTab.value = 'strategy'
-    await nextTick()
-    await loadKlineChart()
+    await task()
+    return null
   } catch (err) {
-    klineError.value = err?.message || String(err)
-  } finally {
-    flowRunning.value = false
+    return `${label}: ${err?.message || String(err)}`
   }
-}
-const runGridSearch = async () => {
-  const buyGrid = buildGridParamPayload(activeBuyStrategy.value, gridBuyParamLists)
-  const sellGrid = buildGridParamPayload(activeSellStrategy.value, gridSellParamLists)
-  const rankingWeights = {
-    profit: Number(gridForm.ranking_weights?.profit ?? 1),
-    win_rate: Number(gridForm.ranking_weights?.win_rate ?? 1),
-    sharpe: Number(gridForm.ranking_weights?.sharpe ?? 1),
-    annual_return: Number(gridForm.ranking_weights?.annual_return ?? 1),
-    drawdown: Number(gridForm.ranking_weights?.drawdown ?? 1)
-  }
-  const customBuyList = parseStringList(gridForm.buy_strategies)
-  const customSellList = parseStringList(gridForm.sell_strategies)
-  const buyStrategyList = gridExploreAllStrategies.value
-    ? buyStrategies.value.map((item) => item.id).filter(Boolean)
-    : customBuyList
-  const sellStrategyList = gridExploreAllStrategies.value
-    ? sellStrategies.value.map((item) => item.id).filter(Boolean)
-    : customSellList
-  const baseSymbols = gridUseBacktestBase.value ? backtestForm.symbols : gridForm.symbols
-  const baseMarketRaw = gridUseBacktestBase.value ? backtestForm.market : gridForm.market
-  const baseMarket = inferMarketBySymbols(baseSymbols, baseMarketRaw)
-  if (gridUseBacktestBase.value) backtestForm.market = baseMarket
-  else gridForm.market = baseMarket
-  const baseCash = gridUseBacktestBase.value ? backtestForm.cash : gridForm.cash
-  const baseStart = gridUseBacktestBase.value ? backtestForm.start : gridForm.start
-  const baseEnd = gridUseBacktestBase.value ? backtestForm.end : gridForm.end
-  const baseNFolds = gridUseBacktestBase.value ? backtestForm.n_folds : gridForm.n_folds
-  const normalizedMaxRuns = Math.max(1, Number(gridForm.max_runs || 150))
-  gridForm.max_runs = normalizedMaxRuns
-  const job = await store.startGridSearch({
-    market: baseMarket,
-    symbols: baseSymbols,
-    n_folds: baseNFolds,
-    start: baseStart || undefined,
-    end: baseEnd || undefined,
-    cash: baseCash,
-    buy_strategy: buyStrategyId.value,
-    sell_strategy: sellStrategyId.value,
-    buy_strategies: buyStrategyList.length ? buyStrategyList : undefined,
-    sell_strategies: sellStrategyList.length ? sellStrategyList : undefined,
-    buy_params_grid: buyGrid,
-    sell_params_grid: sellGrid,
-    validation_mode: gridForm.validation_mode,
-    train_ratio: gridForm.train_ratio,
-    walk_forward_days: gridForm.walk_forward_days,
-    walk_forward_step_days: gridForm.walk_forward_step_days,
-    ranking_metric: gridForm.ranking_metric,
-    ranking_weights: rankingWeights,
-    symbol_top_n: gridForm.symbol_top_n,
-    symbol_eval_limit: gridForm.symbol_eval_limit,
-    max_runs: normalizedMaxRuns
-  })
-  await store.fetchJob(job.id)
-}
-const buildToolOptions = () => {
-  const opts = {}
-  if (toolForm.tool === 'support_resistance') opts.only_last = toolOptions.only_last
-  if (toolForm.tool === 'jump_gap') {
-    opts.mode = toolOptions.mode
-    opts.jump_diff_factor = toolOptions.jump_diff_factor
-    opts.power_threshold = toolOptions.power_threshold
-    opts.weight = [toolOptions.weight_a, toolOptions.weight_b]
-  }
-  if (toolForm.tool === 'trend_speed') {
-    opts.benchmark = toolOptions.benchmark
-    opts.resample = toolOptions.resample
-    opts.speed_key = toolOptions.speed_key
-  }
-  if (toolForm.tool === 'shift_distance') {
-    opts.step_x = toolOptions.step_x
-    opts.mode = toolOptions.shift_mode
-  }
-  if (toolForm.tool === 'regress' || toolForm.tool === 'price_channel') {
-    opts.mode = toolOptions.regress_mode
-  }
-  if (toolForm.tool === 'correlation') {
-    opts.corr_type = toolOptions.corr_type
-    opts.field = toolOptions.field
-  }
-  if (toolForm.tool === 'distance') {
-    opts.distance_type = toolOptions.distance_type
-    opts.field = toolOptions.field
-  }
-  return opts
-}
-const runTool = async () => {
-  const effectiveMarket = inferMarketBySymbols(toolForm.symbols, toolForm.market)
-  toolForm.market = effectiveMarket
-  const job = await store.startQuantTool({
-    market: effectiveMarket,
-    tool: toolForm.tool,
-    symbols: toolForm.symbols,
-    n_folds: toolForm.n_folds,
-    start: toolForm.start || undefined,
-    end: toolForm.end || undefined,
-    limit: toolForm.limit,
-    options: buildToolOptions()
-  })
-  await store.fetchJob(job.id)
 }
 onMounted(async () => {
+  initError.value = ''
   refreshPortfolioIndex()
   window.addEventListener('resize', handleResize)
   await restoreQuantSettings()
-  await Promise.all([
-    store.fetchJobs(),
-    store.fetchStrategies(),
-    refreshMlData(),
-    store.searchSymbols({
-      market: market.value,
-      q: query.value,
-      kind: kind.value,
-      page: store.page,
-      pageSize: store.pageSize
-    })
-  ])
+  const initFailures = (
+    await Promise.all([
+      runInitStep('任务列表加载失败', () => store.fetchJobs()),
+      runInitStep('策略列表加载失败', () => store.fetchStrategies()),
+      runInitStep('ML 数据加载失败', () => refreshMlData()),
+      runInitStep('标的列表加载失败', () =>
+        store.searchSymbols({
+          market: market.value,
+          q: query.value,
+          kind: kind.value,
+          page: store.page,
+          pageSize: store.pageSize
+        })
+      )
+    ])
+  ).filter(Boolean)
+  if (initFailures.length) {
+    initError.value = `部分初始化未完成：${initFailures.join('；')}`
+  }
   syncMlSymbols(normalizeSymbolsInputForUi(backtestForm.symbols || ''))
   settingsReady.value = true
   scheduleSaveQuantSettings()
@@ -1521,6 +1049,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('resize', handleResize)
   clearSettingsSaveTimer()
+  revokeTrendPreview()
   cleanupCharts()
 })
 </script>

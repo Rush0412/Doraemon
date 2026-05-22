@@ -1,4 +1,4 @@
-﻿from .quant_core_utils import *
+from .quant_core_utils import *
 from .quant_data_utils import *
 from .quant_backtest_utils import *
 

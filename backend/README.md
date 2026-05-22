@@ -16,8 +16,10 @@ cd backend
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
-# 可选：覆盖数据库连接
+# 可选：复制默认配置后按本机环境调整
+# Copy-Item .env.example .env
 # $env:DATABASE_URL="postgresql://postgres:123456@localhost:5432/doraemon"
 
 uvicorn app.main:app --reload --port 8002

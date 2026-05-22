@@ -73,6 +73,7 @@ export function useMlWorkflow({
   const syncSymbols = (text) => {
     mlFeatureForm.symbols = text
     mlPredictForm.symbols = text
+    mlSelectForm.symbols = text
   }
 
   watch(market, (val) => {

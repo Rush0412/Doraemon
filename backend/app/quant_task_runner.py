@@ -1,4 +1,4 @@
-﻿﻿﻿﻿from . import crud
+from . import crud
 from .database import SessionLocal, ensure_database_schema
 from .quant_analysis_service import _run_analysis_job
 from .quant_ml_pipeline import run_ml_feature_job, run_ml_predict_job, run_ml_train_job
@@ -256,6 +256,7 @@ def _run_job(job_id: int):
             _validate_strategy_list([sell_strategy], "sell")
             buy_factors = _build_buy_factors(job.params)
             sell_factors = _build_sell_factors(job.params)
+            commission_dict = _build_commission_dict(job.params)
             fallback_symbol = benchmark_symbol
             with _with_pg_data_env(market), _with_benchmark_fallback(fallback_symbol):
                 abu_result, _ = abu.run_loop_back(
@@ -266,6 +267,7 @@ def _run_job(job_id: int):
                     n_folds=job.params.get("n_folds", 1),
                     start=job.params.get("start"),
                     end=job.params.get("end"),
+                    commission_dict=commission_dict,
                     n_process_kl=1,
                     n_process_pick=1,
                 )
@@ -283,8 +285,7 @@ def _run_job(job_id: int):
                 "benchmark": getattr(getattr(abu_result, "benchmark", None), "symbol", None),
             }
             orders_pd = getattr(abu_result, "orders_pd", None)
-            summary.update(_summarize_orders(orders_pd))
-            summary.update(_summarize_capital(getattr(abu_result, "capital", None)))
+            summary.update(_summarize_run(abu_result, params=job.params))
             top_symbols = _summarize_orders_by_symbol(orders_pd, top_n=10)
             equity_curve = _capital_curve_points(getattr(abu_result, "capital", None), limit=3000)
             orders_preview = None
@@ -494,6 +495,7 @@ def _run_job(job_id: int):
                             try:
                                 buy_factors = _build_buy_factors(combo_params)
                                 sell_factors = _build_sell_factors(combo_params)
+                                commission_dict = _build_commission_dict(combo_params)
                                 summary = {
                                     "buy_strategy": buy_strategy,
                                     "sell_strategy": sell_strategy,
@@ -518,11 +520,12 @@ def _run_job(job_id: int):
                                                 n_folds=n_folds,
                                                 start=train_start.isoformat(),
                                                 end=train_end.isoformat(),
+                                                commission_dict=commission_dict,
                                                 n_process_kl=1,
                                                 n_process_pick=1,
                                             )
                                             if train_result is not None:
-                                                train_summaries.append(_summarize_run(train_result))
+                                                train_summaries.append(_summarize_run(train_result, params=combo_params))
                                             val_result, _ = abu.run_loop_back(
                                                 read_cash=cash,
                                                 buy_factors=buy_factors,
@@ -531,11 +534,12 @@ def _run_job(job_id: int):
                                                 n_folds=n_folds,
                                                 start=val_start.isoformat(),
                                                 end=val_end.isoformat(),
+                                                commission_dict=commission_dict,
                                                 n_process_kl=1,
                                                 n_process_pick=1,
                                             )
                                             if val_result is not None:
-                                                validation_summaries.append(_summarize_run(val_result))
+                                                validation_summaries.append(_summarize_run(val_result, params=combo_params))
                                         except Exception as slice_exc:
                                             if len(run_errors) < 30:
                                                 run_errors.append(
@@ -570,13 +574,14 @@ def _run_job(job_id: int):
                                         n_folds=n_folds,
                                         start=start,
                                         end=end,
+                                        commission_dict=commission_dict,
                                         n_process_kl=1,
                                         n_process_pick=1,
                                     )
                                     if abu_result is None:
                                         continue
                                     summary["benchmark"] = getattr(getattr(abu_result, "benchmark", None), "symbol", None)
-                                    summary.update(_summarize_run(abu_result))
+                                    summary.update(_summarize_run(abu_result, params=combo_params))
                                     summary["orders_rows"] = int(
                                         summary.get("closed_orders", 0) + summary.get("open_orders", 0)
                                     )
@@ -633,6 +638,8 @@ def _run_job(job_id: int):
                         end=end,
                         top_n=symbol_top_n,
                         eval_limit=symbol_eval_limit,
+                        run_kwargs={"commission_dict": _build_commission_dict(best_params)},
+                        summary_params=best_params,
                     )
                     top_symbols = symbol_eval.get("top") or []
                     symbol_eval_meta = {
@@ -777,6 +784,8 @@ def _run_job(job_id: int):
                     end=end,
                     top_n=symbol_top_n,
                     eval_limit=symbol_eval_limit,
+                    run_kwargs={"commission_dict": _build_commission_dict(params_with_strategy)},
+                    summary_params=params_with_strategy,
                 )
 
             top_symbols = symbol_eval.get("top") or []
@@ -786,6 +795,7 @@ def _run_job(job_id: int):
                 "sell_strategy": sell_strategy,
                 "buy_params": _params_dict(job.params.get("buy_params")),
                 "sell_params": _params_dict(job.params.get("sell_params")),
+                "trade_costs": _trade_cost_config(params_with_strategy),
             }
             summary_metrics = _summary_from_ranked_symbols(top_symbols, base_summary)
             recommendation = _build_strategy_recommendation(summary_metrics, top_symbols)

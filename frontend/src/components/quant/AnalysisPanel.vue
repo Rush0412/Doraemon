@@ -14,6 +14,7 @@
           <div>
             <label class="label">市场</label>
             <select v-model="toolForm.market" class="select">
+              <option value="CN">CN (All A Shares)</option>
               <option value="SH">SH (Shanghai)</option>
               <option value="SZ">SZ (Shenzhen)</option>
               <option value="300">300 (ChiNext)</option>
@@ -191,12 +192,13 @@
 
         <div class="toolbar">
           <button class="btn-primary" @click="runTool" :disabled="actionsBusy">执行分析</button>
-          <span class="muted">执行后查看任务详情</span>
+          <span class="muted">{{ analysisStatusText || '执行后自动回填分析结果' }}</span>
         </div>
       </div>
 
       <div class="tool-result">
         <h3>分析结果预览</h3>
+        <p v-if="analysisError" class="error">{{ analysisError }}</p>
         <div v-if="analysisResult" class="code-wrap">
           <pre class="code">{{ analysisText }}</pre>
         </div>
@@ -245,7 +247,7 @@
             </div>
           </div>
         </div>
-        <p v-else class="muted">暂无分析结果。</p>
+        <p v-else class="muted">{{ analysisStatusText || '暂无分析结果。' }}</p>
       </div>
     </div>
   </section>
@@ -286,6 +288,8 @@ defineProps({
   toolOptionMode: String,
   analysisResult: Object,
   analysisText: String,
+  analysisError: String,
+  analysisStatusText: String,
   analysisOverlayEnabled: Boolean,
   setAnalysisOverlayEnabled: Function,
   runTool: Function,

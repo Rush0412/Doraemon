@@ -1,4 +1,4 @@
-﻿﻿﻿﻿from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from itertools import product
 import logging
@@ -381,4 +381,3 @@ def _filter_param_grid(strategy_id: str, group: str, grid: dict) -> dict:
 
 
 __all__ = [name for name in globals().keys() if not name.startswith("__")]
-

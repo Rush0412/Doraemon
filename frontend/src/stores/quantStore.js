@@ -174,6 +174,10 @@ export const useQuantStore = defineStore('quant', {
       this._upsertJob(job)
       return job
     },
+    async runTrendAnalysisDemo(params = {}) {
+      const { data } = await api.post('/quant/trend-analysis/demo', params)
+      return data.data
+    },
     async startMlFeatureBuild(params = {}) {
       const { data } = await api.post('/quant/ml/features/build', params)
       const job = data.data

@@ -52,11 +52,13 @@
                 >
                   导出 JSON
                 </a>
-                <a v-if="job.status === 'succeeded' && job.result?.orders" class="btn-ghost" :href="exportUrl(job.id, 'csv', 'orders')">
-                  订单 CSV
-                </a>
-                <a v-if="job.status === 'succeeded' && job.result?.actions" class="btn-ghost" :href="exportUrl(job.id, 'csv', 'actions')">
-                  行为 CSV
+                <a
+                  v-for="section in jobExportSections(job)"
+                  :key="`${job.id}-${section.key}`"
+                  class="btn-ghost"
+                  :href="exportUrl(job.id, section.format, section.section)"
+                >
+                  {{ section.label }}
                 </a>
                 <button class="btn-secondary" @click="selectJob(job.id)">详情</button>
                 <button class="btn-secondary" @click="removeJob(job)">
@@ -115,6 +117,7 @@ defineProps({
   formatTime: Function,
   brief: Function,
   exportUrl: Function,
+  jobExportSections: Function,
   selectJob: Function,
   removeJob: Function,
   batchDeleteFinished: Function,

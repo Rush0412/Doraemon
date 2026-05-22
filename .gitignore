@@ -10,3 +10,4 @@ test.py
 /frontend/node_modules/*
 /backend/.venv/*
 .venv/*
+/backend/.env

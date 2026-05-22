@@ -1,4 +1,4 @@
-﻿from contextlib import contextmanager
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import csv
@@ -84,10 +84,49 @@ def _resolve_date_range(start: Optional[str], end: Optional[str], n_folds: int) 
     return start_date, end_date
 
 
+def _ensure_atr_columns(df):
+    if df is None or getattr(df, "empty", False):
+        return df
+    if not {"high", "low", "close"}.issubset(df.columns):
+        return df
+    import pandas as pd
+
+    high = pd.to_numeric(df.get("high"), errors="coerce")
+    low = pd.to_numeric(df.get("low"), errors="coerce")
+    close = pd.to_numeric(df.get("close"), errors="coerce")
+    prev_close = pd.to_numeric(df.get("pre_close"), errors="coerce") if "pre_close" in df.columns else close.shift(1)
+    prev_close = prev_close.where(prev_close.notna(), close.shift(1))
+
+    true_range = pd.concat(
+        [
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+
+    def _fill_atr_column(column: str, window: int):
+        existing = pd.to_numeric(df.get(column), errors="coerce") if column in df.columns else None
+        computed = true_range.rolling(window, min_periods=1).mean()
+        if existing is None:
+            df[column] = computed
+            return
+        if existing.notna().any():
+            df[column] = existing.where(existing.notna(), computed)
+            return
+        df[column] = computed
+
+    _fill_atr_column("atr14", 14)
+    _fill_atr_column("atr21", 21)
+    return df
+
+
 def _kl_rows_from_df(df, market: str, symbol: str) -> list[dict]:
     if df is None or getattr(df, "empty", False):
         return []
     df = _normalize_kl_df(df)
+    df = _ensure_atr_columns(df)
     if df is None or getattr(df, "empty", False):
         return []
     rows = []
@@ -154,9 +193,7 @@ def _kl_df_from_rows(rows: list) -> Optional["pandas.DataFrame"]:
         df["date_week"] = df["date"].apply(_date_week_from_int)
     if "key" not in df.columns or df["key"].isna().all():
         df["key"] = list(range(len(df)))
-    for col in ("atr14", "atr21"):
-        if col in df.columns and df[col].isna().all():
-            df.drop(columns=[col], inplace=True)
+    df = _ensure_atr_columns(df)
     df.index = pd.to_datetime(df["date"].astype(str))
     try:
         df.name = rows[0].symbol
@@ -227,6 +264,7 @@ def _normalize_kl_df(df):
         df["date_week"] = df["date"].apply(_date_week_from_int)
     if "key" not in df.columns or df["key"].isna().all():
         df["key"] = list(range(len(df)))
+    df = _ensure_atr_columns(df)
     return df
 
 

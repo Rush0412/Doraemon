@@ -22,8 +22,8 @@ def import_symbols(payload: schemas.QuantPayloadBase, db: Session = Depends(get_
 
 
 @quant_router.post("/symbols/manual", response_model=schemas.APIResponse)
-def upsert_manual_symbols(payload: dict, db: Session = Depends(get_db)):
-    return service.upsert_manual_symbols(payload, db)
+def upsert_manual_symbols(payload: schemas.ManualSymbolsPayload, db: Session = Depends(get_db)):
+    return service.upsert_manual_symbols(payload.model_dump(exclude_none=True), db)
 
 
 @quant_router.get("/symbols", response_model=schemas.APIResponse)
@@ -84,6 +84,11 @@ def start_stock_select(payload: schemas.BacktestPayload, db: Session = Depends(g
 @quant_router.post("/tools", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)
 def start_quant_tools(payload: schemas.AnalysisPayload, db: Session = Depends(get_db)):
     return service.start_quant_tools(payload.model_dump(exclude_none=True), db)
+
+
+@quant_router.post("/trend-analysis/demo", response_model=schemas.APIResponse)
+def run_trend_analysis_demo(payload: schemas.TrendAnalysisDemoPayload):
+    return service.run_trend_analysis_demo(payload)
 
 
 @quant_router.post("/ml/features/build", response_model=schemas.APIResponse, status_code=status.HTTP_202_ACCEPTED)

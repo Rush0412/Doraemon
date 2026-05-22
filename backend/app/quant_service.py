@@ -1,4 +1,4 @@
-﻿from .quant_base import STRATEGY_CATALOG, executor
+from .quant_base import STRATEGY_CATALOG, executor
 from .quant_job_service import (
     start_backtest,
     start_grid_search,
@@ -21,6 +21,7 @@ from .quant_symbol_service import (
     search_symbols,
     upsert_manual_symbols,
 )
+from .trend_analysis_service import run_trend_analysis_demo
 from .quant_task_runner import _run_job
 
 __all__ = [
@@ -47,4 +48,5 @@ __all__ = [
     "list_ml_models",
     "promote_ml_model",
     "list_ml_predictions",
+    "run_trend_analysis_demo",
 ]

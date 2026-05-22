@@ -11,6 +11,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from .config import get_settings
 from .database import ensure_database_schema
@@ -25,6 +26,20 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("doraemon")
+
+
+def _safe_validation_errors(exc: RequestValidationError | ValidationError):
+    safe_errors = []
+    for item in exc.errors():
+        normalized = dict(item)
+        ctx = normalized.get("ctx")
+        if isinstance(ctx, dict):
+            normalized["ctx"] = {
+                key: (str(value) if isinstance(value, Exception) else value)
+                for key, value in ctx.items()
+            }
+        safe_errors.append(normalized)
+    return safe_errors
 
 if settings.auto_create_tables:
     ensure_database_schema()
@@ -75,7 +90,16 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     logger.info("%s %s 422", request.method, request.url.path)
     return JSONResponse(
         status_code=422,
-        content=APIResponse(message="Validation Error", data={"error": exc.errors()}).model_dump(),
+        content=APIResponse(message="Validation Error", data={"error": _safe_validation_errors(exc)}).model_dump(),
+    )
+
+
+@app.exception_handler(ValidationError)
+async def pydantic_validation_exception_handler(request: Request, exc: ValidationError):
+    logger.info("%s %s 422", request.method, request.url.path)
+    return JSONResponse(
+        status_code=422,
+        content=APIResponse(message="Validation Error", data={"error": _safe_validation_errors(exc)}).model_dump(),
     )
 
 
